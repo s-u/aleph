@@ -24,17 +24,13 @@
 #include <config.h>
 #endif
 
-#include "IOStuff.h"		/*-> Defn.h */
-#include "Fileio.h"
-#include "Parse.h"
-
+#include "Rcompat.h"
+    
 #define YYERROR_VERBOSE 1
 
 static void yyerror(char *);
 static int yylex();
 int yyparse(void);
-
-/* alloca.h inclusion is now covered by Defn.h */
 
 #define yyconst const
 
