@@ -24,6 +24,7 @@
 #include <config.h>
 #endif
 
+#define __MAIN__
 #include "Rcompat.h"
     
 #define YYERROR_VERBOSE 1
@@ -485,6 +486,7 @@ static int xxvalue(SEXP v, int k, YYLTYPE *lloc)
 	    REPROTECT(SrcRefs = GrowList(SrcRefs, makeSrcref(lloc, SrcFile)), srindex);
 	UNPROTECT_PTR(v);
     }
+    printf("xxvalue: [gc=%d,k=%d] curr = ", GenerateCode, k); PrintValue(v);
     R_CurrentExpr = v;
     return k;
 }
@@ -940,7 +942,11 @@ static SEXP xxexprlist(SEXP a1, YYLTYPE *lloc, SEXP a2)
 
     EatLines = 0;
     if (GenerateCode) {
+#ifdef ALEPH
+	a2->attr[0] = (AObject*) langClass;
+#else
 	SET_TYPEOF(a2, LANGSXP);
+#endif
 	SETCAR(a2, a1);
 	if (SrcFile) {
 	    PROTECT(prevSrcrefs = getAttrib(a2, R_SrcrefSymbol));
@@ -1103,7 +1109,11 @@ static void ParseInit(void)
     FunctionLevel=0;
     SourcePtr = FunctionSource;
     xxcharcount = 0;
+#ifdef ALEPH
+    KeepSource = 1;
+#else
     KeepSource = *LOGICAL(GetOption(install("keep.source"), R_BaseEnv));
+#endif
     npush = 0;
 }
 
@@ -1155,6 +1165,8 @@ SEXP R_Parse1File(FILE *fp, int gencode, ParseStatus *status)
     return R_CurrentExpr;
 }
 
+#ifndef ALEPH
+
 static IoBuffer *iob;
 
 static int buffer_getc(void)
@@ -1184,14 +1196,20 @@ static int text_getc(void)
     return R_TextBufferGetc(txtb);
 }
 
+#endif
+
 static SEXP R_Parse(int n, ParseStatus *status, SEXP srcfile)
 {
+#ifndef ALEPH
     volatile int savestack;
+#endif
     int i;
     SEXP t, rval;
 
     ParseContextInit();
+#ifndef ALEPH
     savestack = R_PPStackTop;
+#endif
     PROTECT(t = NewList());
 
     xxlineno = 1;
@@ -1216,7 +1234,9 @@ static SEXP R_Parse(int n, ParseStatus *status, SEXP srcfile)
 	    break;
 	case PARSE_INCOMPLETE:
 	case PARSE_ERROR:
+#ifndef ALEPH
 	    R_PPStackTop = savestack;
+#endif
 	    SrcFile = NULL;
 	    return R_NilValue;
 	    break;
@@ -1236,10 +1256,14 @@ finish:
 	rval = attachSrcrefs(rval, SrcFile);
 	SrcFile = NULL;
     }
+#ifndef ALEPH
     R_PPStackTop = savestack;
+#endif
     *status = PARSE_OK;
     return rval;
 }
+
+#ifndef ALEPH
 
 /* used in edit.c */
 attribute_hidden
@@ -1386,6 +1410,7 @@ finish:
     return rval;
 }
 
+#endif
 
 /*----------------------------------------------------------------------------
  *
@@ -2836,3 +2861,13 @@ static int yylex(void)
     setlastloc();
     return tok;
 }
+
+#ifdef ALEPH
+static SEXP parsingTest(FILE *f) {
+    ParseStatus ps;
+    R_ParseErrorMsg[0] = 0;
+    SEXP r = R_Parse1File(f, 1, &ps);
+    printf("parse status: %d\nerror message: %s\n", ps, R_ParseErrorMsg);
+    return r;
+}
+#endif

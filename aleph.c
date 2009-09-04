@@ -1,8 +1,11 @@
 #include <stdlib.h>
+#include <limits.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <setjmp.h>
+
+#define ALEPH 1
 
 typedef unsigned int  vlen_t;
 typedef unsigned long vsize_t;
@@ -33,7 +36,7 @@ struct AObject_s {
     AObject *attr[1];  /* array of attributes - the first one is not counted in attrs and is the class object */
 };
 
-#define CLASS(O) ((AClass*)(O->attr[0]))
+#define CLASS(O) ((AClass*)((O)->attr[0]))
 
 /* number of superclasses that are stored directly int the class object. Since most classes have only one or two superclasses we store them directly for speed and use overflow array for special objects that have more superclasses. Note that superclass code needs to be also modified if this is touched. */
 #define BUILTIN_SUPERCLASSES 3
@@ -55,6 +58,8 @@ struct AClass_s {
 
     /* class-level attributes (denoted by negative index in the map) */
     AObject **attr;
+
+    vlen_t flags; /* currently used to simulate R types for now */
     
     /* low-level class functions - those are special functions that need to be really fast */
     AObject *(*copy)(AObject *);
@@ -83,6 +88,14 @@ AObject *A_error(const char *fmt, ...) {
     return NULL;
 }
 
+AObject *A_warning(const char *fmt, ...) {
+    va_list (ap);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    return NULL;
+}
+
 #define NEW_CONTEXT if (setjmp(error_jmpbuf) == 0)
 #define ON_ERROR if (setjmp(error_jmpbuf))
 
@@ -106,6 +119,7 @@ AObject *allocVarObject(AClass *cl, vlen_t size, vlen_t len) {
     o->attrs = a;
     o->size = size;
     o->len = len;
+    printf(" + alloc <%s %p> [%u/%lu/%u]\n", className(o), o, a, size, len);
     return o;
 }
 
@@ -115,6 +129,7 @@ AObject *allocObject(AClass *cl) {
     AObject *o = calloc(1, sizeof(AObject) + sizeof(AObject*) * a);
     o->attr[0] = (AObject*) cl;
     o->attrs = a;
+    printf(" + alloc <%s %p> [%u/no-data]\n", className(o), o, a);
     return o;
 }
 
@@ -173,6 +188,7 @@ symbol_t newSymbol(const char *name) {
     symbol[symbols].obj.size = sizeof(char *);
     symbol[symbols].obj.attr[0] = (AObject*) symbolClass;
     symbol[symbols].name = strdup(name);
+    printf(" - new symbol: [%d] %s\n", symbols + 1, name);
     return symbols++;
 }
 
@@ -185,6 +201,7 @@ AObject *getAttr(AObject *o, symbol_t sym) {
     AClass *c = CLASS(o);
     AObject *a;
     smapi_t ao;
+    printf(" - getAttr <%s %p> %s\n", className(o), o, symbolName(sym));
     if (!c) return A_error("class objects have no attributes");
     if (sym == 1) return (AObject*) c; /* class attribute is special */
     if (sym >= c->attr_map_len) return A_error("object has no %s attribute", symbolName(sym));
@@ -200,6 +217,7 @@ void setAttr(AObject *o, symbol_t sym, AObject *val) {
     if (sym == 1) {
 	A_error("currently assignment to the class attribute is not permitted");
     }
+    printf(" - setAttr <%s %p> %s <%s %p>\n", className(o), o, symbolName(sym), className(val), val);
     if (!c) A_error("class objects have no attributes");
     if (sym >= c->attr_map_len) A_error("object has no %s attribute", symbolName(sym));
     ao = c->attr_map[sym];
@@ -286,12 +304,16 @@ int isAssignable(AObject *o, AClass *cl) {
 }
 
 #define ADataPtr(O) (CLASS(O)->dataPtr(O))
+
 #define LENGTH(X) (CLASS(X)->length(X))
+#define DATAPTR(X) ADataPtr(X)
 
 /*=========================================================================================================*/
 /* derived basic data types and R compatibility macros */
 
-AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass, *stringClass;
+typedef int bool_t; /* FIXME: logical is now 4 byte for compatibility, but we'll want to use 1 byte or so later ... */
+
+AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass, *stringClass, *pairlistClass, *langClass, *complexClass, *logicalClass;
 
 AObject *allocRealVector(vlen_t n) {
     return allocVarObject(realClass, sizeof(double) * n, n);
@@ -301,9 +323,39 @@ AObject *allocIntVector(vlen_t n) {
     return allocVarObject(integerClass, sizeof(int) * n, n);
 }
 
-AObject *allocObjectVector(vlen_t n) {
-    return allocVarObject(listClass, sizeof(AObject*) * n, n);
+AObject *allocLogicalVector(vlen_t n) {
+    return allocVarObject(logicalClass, sizeof(bool_t) * n, n);
 }
+
+AObject *allocObjectVector(AClass *cl, vlen_t n) {
+    return allocVarObject(cl, sizeof(AObject*) * n, n);
+}
+
+#define DIRECT_CDR(X) ((X)->attr[1])
+#define DIRECT_CAR(X) ((X)->attr[2])
+#define DIRECT_TAG(X) ((X)->attr[3])
+
+AObject *consPairs(AClass *cl, AObject *car, AObject *cdr, AObject *tag) {
+    AObject *o = allocObject(cl);
+    DIRECT_CAR(o) = car;
+    DIRECT_CDR(o) = cdr;
+    DIRECT_TAG(o) = tag;
+}
+
+#define CONS(X,Y) consPairs(pairlistClass, X, Y, nullObject)
+#define LCONS(X,Y) consPairs(langClass, X, Y, nullObject)
+
+/* for now we map CAR/CDR/TAG to its direct counterparts */
+#define CAR DIRECT_CAR
+#define CDR DIRECT_CDR
+#define TAG DIRECT_TAG
+#define SET_TAG(X, Y) (DIRECT_TAG(X) = Y)
+#define SETCAR(X, Y) (DIRECT_CAR(X) = Y)
+#define SETCDR(X, Y) (DIRECT_CDR(X) = Y)
+
+#define ASymbol2sym_t(name)  ((symbol_t) ((ASymbol*)(name) - symbol))
+
+#define PRINTNAME(X) mkChar(symbolName(ASymbol2sym_t(X)))
 
 AObject *mkChar(const char *str) {
     vlen_t len = strlen(str);
@@ -312,18 +364,58 @@ AObject *mkChar(const char *str) {
     return o;
 }
 
+AObject *mkCharLen(const char *str, vlen_t len) {
+    AObject *o = allocVarObject(charClass, len + 1, len);
+    char *c = (char*) DIRECT_DATAPTR(o);
+    memcpy(c, str, len);
+    c[len] = 0;
+    return o;
+}
+
+#define mkCharLenCE(S, L, E) mkCharLen(S, L)
+
+typedef struct {
+    double r;
+    double i;
+} complex_t;
+
+AObject *allocComplexVector(vlen_t n) {
+    return allocVarObject(complexClass, sizeof(complex_t) * n, n);
+}
+
 #define REAL(X) ((double*)ADataPtr(X))
 #define INTEGER(X) ((int*)ADataPtr(X))
+#define LOGICAL(X) ((bool_t*)ADataPtr(X))
+#define COMPLEX(X) ((complex_t*)ADataPtr(X))
 #define CHAR(X) ((const char*)ADataPtr(X))
 
 #define GET_VECTOR_ELT(X,I) (((AObject**)ADataPtr(X))[I])
 #define SET_VECTOR_ELT(X,I,V) ((AObject**)ADataPtr(X))[I] = V
 #define GET_STRING_ELT GET_VECTOR_ELT
+#define STRING_ELT GET_VECTOR_ELT
 #define SET_STRING_ELT SET_VECTOR_ELT
 
 AObject *mkString(const char *str) {
-    AObject *o = allocObjectVector(1);
+    AObject *o = allocObjectVector(stringClass, 1);
     SET_STRING_ELT(o, 0, mkChar(str));
+    return o;
+}
+
+AObject *ScalarReal(double val) {
+    AObject *o = allocRealVector(1);
+    REAL(o)[0] = val;
+    return o;
+}
+
+AObject *ScalarInteger(int val) {
+    AObject *o = allocIntVector(1);
+    INTEGER(o)[0] = val;
+    return o;
+}
+
+AObject *ScalarLogical(bool_t val) {
+    AObject *o = allocIntVector(1);
+    INTEGER(o)[0] = val;
     return o;
 }
 
@@ -350,9 +442,16 @@ AObject *symbol_eval(AObject *obj, AObject *where) {
 
 #define R_NilValue nullObject
 
-#define install(C) symbol[newSymbol(C)]
+#define isNull(X) ((X) == nullObject)
+
+#define install(C) ((AObject*)&symbol[newSymbol(C)])
 
 /*=========================================================================================================*/
+
+#ifndef NO_MAIN
+
+static AObject *parsingTest(FILE *f);
+static void init_Rcompat();
 
 int main(int argc, char **argv) {
     ON_ERROR {
@@ -390,7 +489,17 @@ int main(int argc, char **argv) {
     realClass = subclass(numericClass, "real", NULL, NULL);
     integerClass = subclass(numericClass, "integer", NULL, NULL);
     listClass = subclass(vectorClass, "list", NULL, NULL);
+    logicalClass = subclass(vectorClass, "logical", NULL, NULL);
+    complexClass = subclass(vectorClass, "complex", NULL, NULL); /* FIXME: this is for compatibility with R, but maybe a class with Re Im attrs may make more sense .. */
     
+    symbol_t pairlistAttrs[4] = { newSymbol("next"), newSymbol("head"), newSymbol("tag"), 0 };
+    pairlistClass = subclass(objectClass, "pairlist", pairlistAttrs, NULL);
+    pairlistClass->attr_classes[0] = pairlistClass; /* "next" is recursive */
+    langClass = subclass(pairlistClass, "language", NULL, NULL);
+    
+    /* initialize R compatibility code */
+    init_Rcompat();
+
     AObject *str = mkString("foo");
     
     AObject *obj = allocRealVector(10);
@@ -407,5 +516,13 @@ int main(int argc, char **argv) {
     
     PrintValue((AObject*) &symbol[newSymbol("class")]);
     
+    FILE *f = fopen("test.R", "r");
+    if (!f) { fprintf(stderr, "ERROR: cannot open test.R for reading\n"); return 1; }
+
+    AObject *p = parsingTest(f); 
+    PrintValue(p);
+    
     return 0;
 }
+
+#endif
