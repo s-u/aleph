@@ -1,9 +1,7 @@
-/* this is all monolithic for now */
-#if ! defined __MAIN__ && ! defined NO_MAIN
-#define NO_MAIN
-#endif
+#ifndef R_COMPAT_H__
+#define R_COMPAT_H__
 
-#include "aleph.c"
+#include "aleph.h"
 
 #define NILSXP       0    /* nil = NULL */
 #define SYMSXP       1    /* symbols */
@@ -34,10 +32,17 @@
 typedef AObject* SEXP;
 typedef vlen_t R_len_t;
 
+#define RAPI_CALL API_CALL
+#ifdef MAIN__
+#define RAPI_VAR
+#else
+#define RAPI_VAR API_VAR
+#endif
+
 #define TYPEOF(X) (CLASS(X)->flags & 127)
 #define SET_TYPE(X,Y) CLASS(X)->flags = (CLASS(X)->flags & (~ ((vlen_t)127))) | (((vlen_t) Y) & ((vlen_t)127))
 
-SEXP allocVector(int type, vlen_t n) {
+API_CALL SEXP allocVector(int type, vlen_t n) {
     switch (type) {
 	    case VECSXP:
 		return allocObjectVector(listClass, n);
@@ -95,14 +100,14 @@ SEXP allocVector(int type, vlen_t n) {
 
 #define inheritsC(O, CL) isAssignableClass(CLASS(O), CL)
 
-SEXP setAttrib(SEXP vec, SEXP name, SEXP val) {
+API_CALL SEXP setAttrib(SEXP vec, SEXP name, SEXP val) {
     if (CLASS(name) != symbolClass)
 	A_error("setAttrib supports symbols only (encountered %s)", className(name));
     setAttr(vec, ASymbol2sym_t(name), val);
     return val;
 }
 
-SEXP getAttrib(SEXP vec, SEXP name) {
+API_CALL SEXP getAttrib(SEXP vec, SEXP name) {
     if (CLASS(name) != symbolClass)
 	A_error("getAttrib supports symbols only (encountered %s)", className(name));
     return getAttr(vec, ASymbol2sym_t(name));
@@ -112,8 +117,13 @@ static vlen_t length(SEXP x) { return LENGTH(x); }
 
 /* more internal stuff (used by the parser) */
 #define R_EOF -1
-#define extern0 
+#ifdef MAIN__
+#define extern0
 #define INI_as(v) = v
+#else
+#define extern0 extern
+#define INI_as(v)
+#endif
 
 #define TRUE ((Rboolean) 1)
 #define FALSE ((Rboolean) 0)
@@ -146,8 +156,8 @@ extern0 Rboolean R_WarnEscapes  INI_as(TRUE);   /* Warn on unrecognized escapes 
 extern0 Rboolean known_to_be_latin1 INI_as(0);
 extern0 Rboolean known_to_be_utf8 INI_as(1);
 
-AObject *R_MissingArg, *R_CurrentExpr, *R_NaString;
-AObject *R_SrcfileSymbol, *R_SrcrefSymbol, *R_ClassSymbol;
+RAPI_VAR AObject *R_MissingArg, *R_CurrentExpr, *R_NaString;
+RAPI_VAR AObject *R_SrcfileSymbol, *R_SrcrefSymbol, *R_ClassSymbol;
 
 typedef enum {
     CE_NATIVE = 0,
@@ -160,7 +170,7 @@ typedef enum {
 #define error A_error
 #define warning A_warning
 
-void warningcall(SEXP call, const char *fmt, ...) {
+API_CALL void warningcall(SEXP call, const char *fmt, ...) {
     va_list (ap);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -178,7 +188,7 @@ void warningcall(SEXP call, const char *fmt, ...) {
 
 #define R_FINITE(x)    isfinite(x)
 #ifdef __cplusplus
-int R_isnancpp(double); /* in arithmetic.c */
+API_CALL int R_isnancpp(double); /* in arithmetic.c */
 #  define ISNAN(x)     R_isnancpp(x)
 #else
 #  define ISNAN(x)     (isnan(x)!=0)
@@ -195,7 +205,7 @@ LibExtern double R_NegInf;      /* IEEE -Inf */
 LibExtern double R_NaReal;      /* NA_REAL: IEEE */
 LibExtern int    R_NaInt;       /* NA_INTEGER:= INT_MIN currently */
 
-const double R_Zero_Hack = 0.0; /* Silence the Sun compiler */
+static const double R_Zero_Hack = 0.0; /* Silence the Sun compiler */
 
 typedef union {
     double value;
@@ -220,7 +230,7 @@ static double R_ValueOfNA(void)
     return x.value;
 }
 
-int R_IsNA(double x)
+RAPI_CALL int R_IsNA(double x)
 {
     if (isnan(x)) {
         ieee_double y;
@@ -230,7 +240,7 @@ int R_IsNA(double x)
     return 0;
 }
 
-int R_IsNaN(double x)
+RAPI_CALL int R_IsNaN(double x)
 {
     if (isnan(x)) {
         ieee_double y;
@@ -240,7 +250,7 @@ int R_IsNaN(double x)
     return 0;
 }
 
-int R_finite(double x)
+RAPI_CALL int R_finite(double x)
 {
 #if 1
     return isfinite(x);
@@ -249,7 +259,7 @@ int R_finite(double x)
 #endif
 }
 
-
+#ifdef MAIN__
 static void init_Rcompat() {
     R_ClassSymbol = install("class");
     R_SrcfileSymbol = install("srcfile");
@@ -276,4 +286,7 @@ static void init_Rcompat() {
     symbolClass->flags |= SYMSXP;
     objectClass->flags |= S4SXP;
 }
+#endif
+
+#endif
 

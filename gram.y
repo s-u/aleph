@@ -20,6 +20,9 @@
  *  http://www.r-project.org/Licenses/
  */
 
+#include <stdlib.h>
+#include <ctype.h>
+
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
@@ -2863,7 +2866,7 @@ static int yylex(void)
 }
 
 #ifdef ALEPH
-static SEXP parsingTest(FILE *f) {
+SEXP parsingTest(FILE *f) {
     ParseStatus ps;
     R_ParseErrorMsg[0] = 0;
     SEXP r = R_Parse1File(f, 1, &ps);
