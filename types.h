@@ -19,7 +19,7 @@ typedef struct AClass_s AClass;
 typedef struct AObject_s AObject;
 typedef struct ASymbol_s ASymbol;
 
-typedef struct AutoreleasePool_s AutoreleasePool;
+typedef struct AllocationPool_s AllocationPool;
 
 /*============== internals =============*/
 
@@ -37,7 +37,7 @@ typedef struct AutoreleasePool_s AutoreleasePool;
 
 struct AObject_s {
     vlen_t attrs, len; /* number of attributes, length */
-    AutoreleasePool *pool; /* this the allocation pool owning this object. */
+    AllocationPool *pool; /* this the allocation pool owning this object. */
     vsize_t size;      /* size of the data portion (64-bit safe) */
     AObject *attr[1];  /* array of attributes - the first one is not counted in attrs and is the class object */
 };

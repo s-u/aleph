@@ -10,6 +10,9 @@
 
 #define ALEPH 1
 
+/* experimental features (0 = off, 1 = on) */
+#define POOL_WATERMARKS      1
+#define CLASS_WRITE_BARRIER  0
 
 /*=========================================================================================================*/
 
@@ -53,6 +56,51 @@ API_CALL AObject *A_warning(const char *fmt, ...) {
 #define NEW_CONTEXT if (setjmp(error_jmpbuf) == 0)
 #define ON_ERROR if (setjmp(error_jmpbuf))
 
+/* ------- low-level memory management ------- */
+
+extern void gc_run(size_t); /* from gc.c */
+
+API_CALL void *Amalloc(size_t size) {
+    void *v = malloc(size);
+    if (!v) {
+	gc_run(size);
+	v = malloc(size);
+	if (!v)
+	    A_error("FATAL: out of memory - cannot allocate object of size %ld", (long) size);
+    }
+    printf(" + malloc<%p .. %p>\n", v, ((char*)v) + size);
+    return v;
+}
+
+API_CALL void *Acalloc(size_t count, size_t size) {
+    void *v = calloc(count, size);
+    if (!v) {
+	long rs = count;
+	rs *= size;
+	gc_run(rs);
+	v = calloc(count, size);
+	if (!v)
+	    A_error("FATAL: out of memory - cannot allocate zeroed object of size %ld", rs);
+    }
+    printf(" + calloc<%p .. %p>\n", v, ((char*)v) + (count * size));
+    return v;
+}
+
+API_CALL void *Arealloc(void *ptr, size_t size) {
+    void *v = realloc(ptr, size);
+    if (!v) {
+	gc_run(size);
+	v = realloc(ptr, size);
+	if (!v)
+	    A_error("FATAL: out of memory - cannot reallocate object of size %ld", (long) size);
+    }
+    printf(" + realloc <%p> to <%p .. %p>\n", ptr, v, ((char*)v) + size);
+    return v;
+}
+
+
+/** --- random object calls --- */
+
 API_CALL const char *className(AObject *o) {
     return CLASS(o)->name;
 }
@@ -65,10 +113,10 @@ API_CALL AClass *getClass(AObject *o) {
     return CLASS(o);
 }
 
-/** ------ context ------- */
+/** ------ thread context ------- */
 
 typedef struct ThreadContext_s {
-    AutoreleasePool *pool;
+    AllocationPool *pool;
 } ThreadContext;
 
 GHVAR ThreadContext mainThreadContext;
@@ -87,19 +135,31 @@ HIDDEN_CALL void _freeObject(AObject *o) {
 
 /* Idea for implementation: use (stacked?) local allocation pools. Each object is owned by the pool. On assignment the object is moved from the pool (if it's the first assignment), otherwise nothing to do. Objects left in the pool are orphans and can be deleted. This means that we don't need explicit PROTECT/UNPROTECT as all objects are owned until the end of the call (if we wrap calls in pools). We could allow for an explicit release (another perk: in a debug version we could warn if the released object still has a parent but an optimized build could simply skip such checks). For this we may need something in the objects -- a flag that an object has not yet been assigned or alternatively a pointer to the primary owner (once it has multiple owners it can point to a special value or something... - in fact if everything is an obejct is should be the parent and we can check by class whether it's a pool...). The nice part of the latter would be that single-parent objects could be removed immediately (really we just want to know the local pool). [Mabe: a "movable" bit meaning that the object has only one owner] */
 
-/** autorelease pools are currently outside of the object structure simply to allow linear dependency. It it was an object it would first need lists etc. defined before it could work, so we'd rather not go there ... */
-struct AutoreleasePool_s {
-    struct AutoreleasePool_s *prev, *next;
+/** The current representation uses doubly-linked list of pools. There are two roots of such pools - one for garbage collection and one for local pools. Objects are either
+     a) in the local pool (the object has just been allocated)
+     b) in the gc pool (if it was ever referenced by at elast two other objects)
+     c) referenced by exactly one object
+     The true root of all active objects is the root of the local pools. This means that garbage collection can be preformed by 1) marking all objects in gc pool, 2) clearing marks recursively for all objects in the local pools. Any objects in the gc pool with a mark are unreferenced. */
+     
+/** Classes are currenty outside of the GC scope and treated as constants. If we want to change that, CLASS_WRITE_BARRIER #ifs are in place so we can do it ... (Constants have the gc_pool flag but are not actually in the pool so they don't bother anyone...) */
+
+/** autorelease pools are currently outside of the object structure simply to allow linear dependency. If it was an object it would first need lists etc. defined before it could work, so we'd rather not go there ... */
+struct AllocationPool_s {
+    struct AllocationPool_s *prev, *next;
     vlen_t count, ptr, length;
+#if POOL_WATERMARKS
+    vlen_t watermark;
+#endif
     AObject *item[1];
 };
 
-GHVAR AutoreleasePool *gc_pool; /* garbage collector pool -- all garbage-collected objects live there */
+GHVAR AllocationPool *gc_pool; /* garbage collector pool -- all garbage-collected objects live there */
+GHVAR AllocationPool *root_pool; /* root pool -- all "live" objects start here */
 
 /* Allocate a new autorelease pool with the given parent. This function does not affect the current pool. */
-API_CALL AutoreleasePool *newCustomPool(AutoreleasePool *parent, vlen_t size) {
-    AutoreleasePool *np = (AutoreleasePool*) calloc(1, sizeof(AutoreleasePool) + sizeof(AObject*) * size - sizeof(AObject*));
-    if (!np) return (AutoreleasePool*) A_error("unable to allocate new memory pool for %d objects", size);
+API_CALL AllocationPool *newCustomPool(AllocationPool *parent, vlen_t size) {
+    AllocationPool *np = (AllocationPool*) Acalloc(1, sizeof(AllocationPool) + sizeof(AObject*) * size - sizeof(AObject*));
+    if (!np) return (AllocationPool*) A_error("unable to allocate new memory pool for %d objects", size);
     np->length = size;
     np->prev = parent;
     if (parent) {
@@ -113,14 +173,14 @@ API_CALL AutoreleasePool *newCustomPool(AutoreleasePool *parent, vlen_t size) {
     return np;
 }
 
-API_CALL void releasePool(AutoreleasePool *pool) {
+API_CALL void releasePool(AllocationPool *pool) {
     vlen_t i = 0, n;
     if (!pool) return;
     if (pool->next) releasePool(pool->next);
     printf(" - releasing pool <%p> (count=%d)\n", pool, pool->count);
     if (pool->count) {
 	/* all objects in the pool are only owned by the pool so we can free them directly */
-	n = pool->length;
+	n = pool->watermark;
 	while (i < n) {
 	    if (pool->item[i])
 		_freeObject(pool->item[i]);
@@ -138,13 +198,13 @@ API_CALL void releasePool(AutoreleasePool *pool) {
 #define DEFAULT_POOL_SIZE 256
 
 /* create a new autorelease pool. All furhter local allocations will be placed in that pool */
-API_CALL AutoreleasePool *newPool() {
-    AutoreleasePool *cp = newCustomPool(currentPool(), DEFAULT_POOL_SIZE);
+API_CALL AllocationPool *newPool() {
+    AllocationPool *cp = newCustomPool(currentPool(), DEFAULT_POOL_SIZE);
     currentThreadContext()->pool = cp;
     return cp;
 }
 
-API_CALL AObject *addObjectToPool(AObject *obj, AutoreleasePool *pool) {
+API_CALL AObject *addObjectToPool(AObject *obj, AllocationPool *pool) {
     int is_gc = (pool == gc_pool);
     printf(" - move <%p> to pool <%p>(%d/%d,%d)%s\n", obj, pool, pool->count, pool->length, pool->ptr, is_gc ? " (gc_pool)" : "");
     while (pool->next && pool->count == pool->length) pool = pool->next; /* find some available pool ...*/
@@ -152,21 +212,28 @@ API_CALL AObject *addObjectToPool(AObject *obj, AutoreleasePool *pool) {
 	pool = newCustomPool(pool, pool->length);
     pool->item[pool->ptr] = obj;
     pool->count++;
+#if POOL_WATERMARKS
+    if (pool->ptr >= pool->watermark)
+	pool->watermark = pool->ptr + 1;
+#endif
     if (pool->count != pool->length) /* update the ptr to the next empty spot in case there are any */
 	while (pool->item[++(pool->ptr)]) {};
-    /* FIXME: we may have to think about the gc_pool business some more ... */
-    obj->pool = is_gc ? gc_pool: pool;
+    obj->pool = is_gc ? gc_pool : pool;
     return obj;
 }
 
-API_CALL AObject *removeObjectFromPool(AObject *obj, AutoreleasePool *pool) {
+API_CALL AObject *removeObjectFromPool(AObject *obj, AllocationPool *pool) {
     if (pool) {
 	vlen_t i = pool->ptr;
 	printf(" - remove <%p> from pool <%p>(%d/%d,%d)\n", obj, pool, pool->count, pool->length, pool->ptr);
 	/* fast-track heuristic -- if there were no holes we can optimize FILO by looking just before ptr */
 	if (i) i--;
 	if (pool->item[i] != obj) { /* if we didn't find it right away, start a full search */
+#if POOL_WATERMARKS
+	    vsize_t n = pool->watermark;
+#else
 	    vsize_t n = pool->length;
+#endif
 	    i = 0;
 	    while (i < n) {
 		if (pool->item[i] == obj) break;
@@ -176,7 +243,16 @@ API_CALL AObject *removeObjectFromPool(AObject *obj, AutoreleasePool *pool) {
 		return A_error("attempt to remove non-existing object from a pool");
 	}
 	pool->item[i] = 0;
-	if (i < pool->ptr) pool->ptr = i;
+	if (i < pool->ptr)
+	    pool->ptr = i;
+#if POOL_WATERMARKS
+	if (i + 1 == pool->watermark) { /* last item removed - adjust the watermark */
+	    while (pool->watermark && !pool->item[pool->watermark - 1])
+		pool->watermark--;
+	    pool->ptr = pool->watermark; /* also adjust the pointer to point just past the last item */
+	}
+#endif
+
 	obj->pool = 0;
 	pool->count--;
     }
@@ -186,8 +262,12 @@ API_CALL AObject *removeObjectFromPool(AObject *obj, AutoreleasePool *pool) {
 /** allocate variable-length objects (with data) */
 API_CALL AObject *allocVarObject(AClass *cl, vsize_t size, vlen_t len) {
     vlen_t a = cl->attrs;
-    AObject *o = calloc(1, sizeof(AObject) + sizeof(AObject*) * a + size);
+    AObject *o = Acalloc(1, sizeof(AObject) + sizeof(AObject*) * a + size);
+#if CLASS_WRITE_BARRIER
+    set(o->attr, (AObject*) cl);
+#else
     o->attr[0] = (AObject*) cl;
+#endif
     o->attrs = a;
     o->size = size;
     o->len = len;
@@ -199,8 +279,12 @@ API_CALL AObject *allocVarObject(AClass *cl, vsize_t size, vlen_t len) {
 /** allocate fixed-length objets (no data) */
 API_CALL AObject *allocObject(AClass *cl) {
     vlen_t a = cl->attrs;
-    AObject *o = calloc(1, sizeof(AObject) + sizeof(AObject*) * a);
+    AObject *o = Acalloc(1, sizeof(AObject) + sizeof(AObject*) * a);
+#if CLASS_WRITE_BARRIER
+    set(o->attr, (AObject*) cl);
+#else
     o->attr[0] = (AObject*) cl;
+#endif
     o->attrs = a;
     printf(" + alloc <%s %p> [%u/no-data]\n", className(o), o, a);
     addObjectToPool(o, currentPool());
@@ -209,7 +293,8 @@ API_CALL AObject *allocObject(AClass *cl) {
 
 API_FN AObject *default_copy(AObject *obj) {
     vlen_t len = sizeof(AObject) + sizeof(AObject*) * obj->attrs + obj->size;
-    AObject *o = (AObject*) malloc(len);
+    AObject *o = (AObject*) Amalloc(len);
+    /* FIXME: deep copy will include referenced objects which all have to be re-assigned using the write barrier ... */
     memcpy(o, obj, len);
     o->pool = NULL;
     return o;
@@ -255,7 +340,8 @@ API_CALL symbol_t newSymbol(const char *name) {
 	    return i;
     symbol[symbols].obj.attrs = 1;
     symbol[symbols].obj.size = sizeof(char *);
-    symbol[symbols].obj.attr[0] = (AObject*) symbolClass;
+    symbol[symbols].obj.attr[0] = (AObject*) symbolClass; /* this is ok even with class write barrier since symbolClass is constant */
+    symbol[symbols].obj.pool = gc_pool; /* flag it as constant to gc_pool */
     symbol[symbols].name = strdup(name);
     printf(" - new symbol: [%d] %s\n", symbols + 1, name);
     return symbols++;
@@ -280,6 +366,7 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
     return a ? a : nullObject;
 }
 
+/* write-barrier set method to any object pointer location. It needs **ptr because it has to take care of the old value as well as set the new value. */
 API_CALL AObject *set(AObject **ptr, AObject *val) {
     AObject *ov = ptr[0];
     if (ov != val) {
@@ -307,6 +394,7 @@ API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
     if (sym >= c->attr_map_len) A_error("object has no %s attribute", symbolName(sym));
     ao = c->attr_map[sym];
     if (!ao) A_error("object has no %s attribute", symbolName(sym));
+    /* FIXME: this is old code before we had set() - we should re-write it to use set() instead ... */
     if (ao > 0) { /* object-level attribute */
 	AObject *ov = o->attr[sym];
 	if (ov != val) {
@@ -338,8 +426,8 @@ API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
 
 /* creating subclasses (currently only single inheritance is implmeneted) */
 API_CALL AClass *subclass(AClass *cl, const char *name, symbol_t *new_attributes, AClass **new_classes) {
-    AClass *nc = (AClass*) calloc(1, sizeof(AClass));
-    nc->class_obj.attr[0] = (AObject*) classClass;
+    AClass *nc = (AClass*) Acalloc(1, sizeof(AClass));
+    nc->class_obj.attr[0] = (AObject*) classClass; /* this is ok since classClass is constant */
     nc->name = strdup(name);
     nc->class_obj.pool = gc_pool; /* FIXME: classes are currently considered constants so they are flagged with gc_pool even though they are not part of it. Maybe they should be subject to the usual memory management.. */
     symbol_t highest_sym = cl->attr_map_len, ca = cl->attrs, *a;
@@ -352,11 +440,11 @@ API_CALL AClass *subclass(AClass *cl, const char *name, symbol_t *new_attributes
 	    a++; new_atts++;
 	}
 	/* copy superclass' attr map */
-	nc->attr_map = (smapi_t*) calloc(highest_sym + 1, sizeof(smapi_t));
+	nc->attr_map = (smapi_t*) Acalloc(highest_sym + 1, sizeof(smapi_t));
 	nc->attr_map_len = highest_sym + 1;
 	if (cl->attr_map_len)
 	    memcpy(nc->attr_map, cl->attr_map, sizeof(smapi_t) * cl->attr_map_len);
-	nc->attr_classes = malloc((cl->attrs + new_atts) * sizeof(AClass*));
+	nc->attr_classes = Amalloc((cl->attrs + new_atts) * sizeof(AClass*));
 	if (cl->attr_classes)
 	    memcpy(nc->attr_classes, cl->attr_classes, sizeof(AClass*) * cl->attrs);
 	if (new_classes)
@@ -419,6 +507,8 @@ API_CALL int isAssignable(AObject *o, AClass *cl) {
 /*=========================================================================================================*/
 /* derived basic data types and R compatibility macros */
 
+/* FIXME: we should really start with unnamed primitive vectors and define the compatibility using pure Aleph code ... Otherwise this will haut us when we start defining fast primitive methods for arithmetics .. */
+
 API_VAR AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass;
 API_VAR AClass *stringClass, *pairlistClass, *langClass, *complexClass, *logicalClass;
 
@@ -444,9 +534,9 @@ API_CALL AObject *allocObjectVector(AClass *cl, vlen_t n) {
 
 API_CALL AObject *consPairs(AClass *cl, AObject *car, AObject *cdr, AObject *tag) {
     AObject *o = allocObject(cl);
-    DIRECT_CAR(o) = car;
-    DIRECT_CDR(o) = cdr;
-    DIRECT_TAG(o) = tag;
+    set(&DIRECT_CAR(o), car);
+    set(&DIRECT_CDR(o), cdr);
+    set(&DIRECT_TAG(o), tag);
     return o;
 }
 
@@ -458,8 +548,8 @@ API_CALL AObject *consPairs(AClass *cl, AObject *car, AObject *cdr, AObject *tag
 #define CDR DIRECT_CDR
 #define TAG DIRECT_TAG
 #define SET_TAG(X, Y) set(&DIRECT_TAG(X), Y)
-#define SETCAR(X, Y) set(DIRECT_CAR(X), Y)
-#define SETCDR(X, Y) set(DIRECT_CDR(X), Y)
+#define SETCAR(X, Y) set(&DIRECT_CAR(X), Y)
+#define SETCDR(X, Y) set(&DIRECT_CDR(X), Y)
 
 #define ASymbol2sym_t(name)  ((symbol_t) ((ASymbol*)(name) - symbol))
 

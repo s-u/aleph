@@ -5,8 +5,6 @@
 
 static int aleph_initialized = 0;
 
-static AutoreleasePool *rootPool;
-
 int alephInitialize() {
     if (aleph_initialized) return 0;
 
@@ -15,12 +13,12 @@ int alephInitialize() {
 	return 1;
     }
 
-    gc_pool = newCustomPool(NULL, 1024*1024); /* create the garbage collector pool */
-    rootPool = newPool(); /* create the local root pool */
+    gc_pool = newCustomPool(NULL, 1024*1024); /* create the garbage collector pool. It's large by default since we don't want to be allocating too many of them (but it could be probably smaller ...) */
+    root_pool = newPool(); /* create the root pool */
     
     printf("sizeof(AObject) = %u, sizeof(AClass) = %u\n", (unsigned int) sizeof(AObject), (unsigned int) sizeof(AClass));
     
-    /* fix up pools for all static objects -- we are currently flagging constents with gc_pool even though they are not incuded it in, because objects with gc_pool are not freed */
+    /* fix up pools for all static objects -- we are currently flagging constants with gc_pool even though they are not incuded it in, because objects with gc_pool are not freed */
     nullObject->pool = gc_pool;
     
     newSymbol(""); /* symbol at index 0 is the empty symbol - it is interpreted as no symbol in maps */
@@ -38,6 +36,9 @@ int alephInitialize() {
     nullClass->eval = classClass->eval = objectClass->eval = default_eval;
     symbolClass->eval = symbol_eval;
     nullClass->call = symbolClass->call = classClass->call = objectClass->call = default_call;
+    
+    /* set pool to gc_pool for all static classes as constants */
+    symbolClass->class_obj.pool = nullClass->class_obj.pool = classClass->class_obj.pool = objectClass->class_obj.pool = gc_pool;
     
     /* define most basic classes that are not directly definable due to cycles */
     charClass = subclass(objectClass, "characterString", NULL, NULL); /* this one doesn't really exist in R */
@@ -72,7 +73,7 @@ int main(int argc, char **argv) {
     if (alephInitialize())
 	return 1;
     
-    AutoreleasePool *pool = newPool();
+    AllocationPool *pool = newPool();
     
     AObject *str = mkString("foo");
     
@@ -101,8 +102,8 @@ int main(int argc, char **argv) {
     printf("The local pool contains %d objects\n", pool->count);
     releasePool(pool);
 
-    printf("The root pool contains %d objects\n", rootPool->count);
-    releasePool(rootPool); /* remove the root pool */
+    printf("The root pool contains %d objects\n", root_pool->count);
+    releasePool(root_pool); /* remove the root pool */
 
     printf("The gc pool contains %d objects\n", gc_pool->count);
     releasePool(gc_pool); /* also remove the gc pool and thus all objects */

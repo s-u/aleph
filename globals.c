@@ -7,4 +7,4 @@ vlen_t  symbols = 0;
 
 ThreadContext mainThreadContext;
 
-AutoreleasePool *gc_pool;
+AllocationPool *gc_pool, *root_pool;
