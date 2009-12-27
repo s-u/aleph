@@ -128,8 +128,10 @@ API_CALL void releasePool(AutoreleasePool *pool) {
 	}
     }
     /* free the pool itself */
-    if (pool->prev)
+    if (pool->prev) {
+	pool->prev->next = NULL;
 	pool->prev = NULL;
+    }
     free(pool);
 }
 
@@ -276,6 +278,22 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
     if (!ao) return A_error("object has no %s attribute", symbolName(sym));
     a = (ao > 0) ? o->attr[sym] : c->attr[1 - ao];
     return a ? a : nullObject;
+}
+
+API_CALL AObject *set(AObject **ptr, AObject *val) {
+    AObject *ov = ptr[0];
+    if (ov != val) {
+	ptr[0] = val;
+	if (ov && ov->pool != gc_pool) /* if the value was not GC'd we can free it [since we owned it it can't be in a local pool - but we could add a sanity check] */
+	    _freeObject(ov);
+	if (val && val->pool != gc_pool) { /* if the value is not multi-owned, we have to adjust the pool */
+	    if (val->pool) /* has a local pool -> moves from the pool to NULL state which is single ownership */
+		removeObjectFromPool(val, val->pool);
+	    else /* is already single-owned -> has to be moved to the gc pool */
+		addObjectToPool(val, gc_pool);
+	}
+    }
+    return val;
 }
 
 API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
@@ -439,9 +457,9 @@ API_CALL AObject *consPairs(AClass *cl, AObject *car, AObject *cdr, AObject *tag
 #define CAR DIRECT_CAR
 #define CDR DIRECT_CDR
 #define TAG DIRECT_TAG
-#define SET_TAG(X, Y) (DIRECT_TAG(X) = Y)
-#define SETCAR(X, Y) (DIRECT_CAR(X) = Y)
-#define SETCDR(X, Y) (DIRECT_CDR(X) = Y)
+#define SET_TAG(X, Y) set(&DIRECT_TAG(X), Y)
+#define SETCAR(X, Y) set(DIRECT_CAR(X), Y)
+#define SETCDR(X, Y) set(DIRECT_CDR(X), Y)
 
 #define ASymbol2sym_t(name)  ((symbol_t) ((ASymbol*)(name) - symbol))
 
@@ -475,7 +493,7 @@ API_CALL AObject *allocComplexVector(vlen_t n) {
 #define CHAR(X) ((const char*)ADataPtr(X))
 
 #define GET_VECTOR_ELT(X,I) (((AObject**)ADataPtr(X))[I])
-#define SET_VECTOR_ELT(X,I,V) ((AObject**)ADataPtr(X))[I] = V
+#define SET_VECTOR_ELT(X,I,V) set(((AObject**)ADataPtr(X)) + (I), V)
 #define GET_STRING_ELT GET_VECTOR_ELT
 #define STRING_ELT GET_VECTOR_ELT
 #define SET_STRING_ELT SET_VECTOR_ELT
