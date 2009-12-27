@@ -17,9 +17,19 @@
 /*=========================================================================================================*/
 
 #define API_VAR extern
+#if (__STDC_VERSION__ >= 199901L)
+#ifdef MAIN__
+#define API_CALL extern inline
+#define HIDDEN_CALL static inline
+#else
+#define API_CALL inline
+#define HIDDEN_CALL static inline
+#endif
+#else
 #define API_CALL static
-#define API_FN API_CALL
 #define HIDDEN_CALL static
+#endif
+#define API_FN API_CALL
 #define GHVAR extern
 
 #pragma mark --- objects and classes ---
