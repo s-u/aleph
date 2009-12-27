@@ -16,6 +16,7 @@
 #define API_VAR extern
 #define API_CALL static
 #define API_FN API_CALL
+#define HIDDEN_CALL static
 #define GHVAR extern
 
 #pragma mark --- objects and classes ---
@@ -64,6 +65,122 @@ API_CALL AClass *getClass(AObject *o) {
     return CLASS(o);
 }
 
+/** ------ context ------- */
+
+typedef struct ThreadContext_s {
+    AutoreleasePool *pool;
+} ThreadContext;
+
+GHVAR ThreadContext mainThreadContext;
+
+#define currentThreadContext() (&mainThreadContext)
+#define currentPool() (currentThreadContext()->pool)
+
+/** ------ memory management ------- */
+
+/** this is the internal, low-level free call - it should never be made available to the outside code. This call is used to free an object that is already devoid of any references. */
+HIDDEN_CALL void _freeObject(AObject *o) {
+    /* FIXME: recursively delete ... destructor? */
+    printf(" - freeing object <%p>\n", o);
+    free(o);
+}
+
+/* Idea for implementation: use (stacked?) local allocation pools. Each object is owned by the pool. On assignment the object is moved from the pool (if it's the first assignment), otherwise nothing to do. Objects left in the pool are orphans and can be deleted. This means that we don't need explicit PROTECT/UNPROTECT as all objects are owned until the end of the call (if we wrap calls in pools). We could allow for an explicit release (another perk: in a debug version we could warn if the released object still has a parent but an optimized build could simply skip such checks). For this we may need something in the objects -- a flag that an object has not yet been assigned or alternatively a pointer to the primary owner (once it has multiple owners it can point to a special value or something... - in fact if everything is an obejct is should be the parent and we can check by class whether it's a pool...). The nice part of the latter would be that single-parent objects could be removed immediately (really we just want to know the local pool). [Mabe: a "movable" bit meaning that the object has only one owner] */
+
+/** autorelease pools are currently outside of the object structure simply to allow linear dependency. It it was an object it would first need lists etc. defined before it could work, so we'd rather not go there ... */
+struct AutoreleasePool_s {
+    struct AutoreleasePool_s *prev, *next;
+    vlen_t count, ptr, length;
+    AObject *item[1];
+};
+
+GHVAR AutoreleasePool *gc_pool; /* garbage collector pool -- all garbage-collected objects live there */
+
+/* Allocate a new autorelease pool with the given parent. This function does not affect the current pool. */
+API_CALL AutoreleasePool *newCustomPool(AutoreleasePool *parent, vlen_t size) {
+    AutoreleasePool *np = (AutoreleasePool*) calloc(1, sizeof(AutoreleasePool) + sizeof(AObject*) * size - sizeof(AObject*));
+    if (!np) return (AutoreleasePool*) A_error("unable to allocate new memory pool for %d objects", size);
+    np->length = size;
+    np->prev = parent;
+    if (parent) {
+	if (parent->next) { /* if there is already a pool, insert instead */
+	    np->next = parent->next;
+	    np->next->prev = np;
+	}
+	parent->next = np;
+    }
+    printf(" + new autorelease pool <%p>, size=%d\n", np, size);
+    return np;
+}
+
+API_CALL void releasePool(AutoreleasePool *pool) {
+    vlen_t i = 0, n;
+    if (!pool) return;
+    if (pool->next) releasePool(pool->next);
+    printf(" - releasing pool <%p> (count=%d)\n", pool, pool->count);
+    if (pool->count) {
+	/* all objects in the pool are only owned by the pool so we can free them directly */
+	n = pool->length;
+	while (i < n) {
+	    if (pool->item[i])
+		_freeObject(pool->item[i]);
+	    i++;
+	}
+    }
+    /* free the pool itself */
+    if (pool->prev)
+	pool->prev = NULL;
+    free(pool);
+}
+
+#define DEFAULT_POOL_SIZE 256
+
+/* create a new autorelease pool. All furhter local allocations will be placed in that pool */
+API_CALL AutoreleasePool *newPool() {
+    AutoreleasePool *cp = newCustomPool(currentPool(), DEFAULT_POOL_SIZE);
+    currentThreadContext()->pool = cp;
+    return cp;
+}
+
+API_CALL AObject *addObjectToPool(AObject *obj, AutoreleasePool *pool) {
+    int is_gc = (pool == gc_pool);
+    printf(" - move <%p> to pool <%p>(%d/%d,%d)%s\n", obj, pool, pool->count, pool->length, pool->ptr, is_gc ? " (gc_pool)" : "");
+    while (pool->next && pool->count == pool->length) pool = pool->next; /* find some available pool ...*/
+    if (pool->count == pool->length) /* or .. if there is none, create another pool (take the size from the parent) */
+	pool = newCustomPool(pool, pool->length);
+    pool->item[pool->ptr] = obj;
+    pool->count++;
+    if (pool->count != pool->length) /* update the ptr to the next empty spot in case there are any */
+	while (pool->item[++(pool->ptr)]) {};
+    /* FIXME: we may have to think about the gc_pool business some more ... */
+    obj->pool = is_gc ? gc_pool: pool;
+    return obj;
+}
+
+API_CALL AObject *removeObjectFromPool(AObject *obj, AutoreleasePool *pool) {
+    if (pool) {
+	vlen_t i = pool->ptr;
+	printf(" - remove <%p> from pool <%p>(%d/%d,%d)\n", obj, pool, pool->count, pool->length, pool->ptr);
+	/* fast-track heuristic -- if there were no holes we can optimize FILO by looking just before ptr */
+	if (i) i--;
+	if (pool->item[i] != obj) { /* if we didn't find it right away, start a full search */
+	    vsize_t n = pool->length;
+	    i = 0;
+	    while (i < n) {
+		if (pool->item[i] == obj) break;
+		i++;
+	    }
+	    if (i == n) /* not found - this is a fatal error -- we should really supply some more info */
+		return A_error("attempt to remove non-existing object from a pool");
+	}
+	pool->item[i] = 0;
+	if (i < pool->ptr) pool->ptr = i;
+	obj->pool = 0;
+	pool->count--;
+    }
+    return obj;
+}
+
 /** allocate variable-length objects (with data) */
 API_CALL AObject *allocVarObject(AClass *cl, vsize_t size, vlen_t len) {
     vlen_t a = cl->attrs;
@@ -73,6 +190,7 @@ API_CALL AObject *allocVarObject(AClass *cl, vsize_t size, vlen_t len) {
     o->size = size;
     o->len = len;
     printf(" + alloc <%s %p> [%u/%lu/%u]\n", className(o), o, a, size, len);
+    addObjectToPool(o, currentPool());
     return o;
 }
 
@@ -83,6 +201,7 @@ API_CALL AObject *allocObject(AClass *cl) {
     o->attr[0] = (AObject*) cl;
     o->attrs = a;
     printf(" + alloc <%s %p> [%u/no-data]\n", className(o), o, a);
+    addObjectToPool(o, currentPool());
     return o;
 }
 
@@ -90,6 +209,7 @@ API_FN AObject *default_copy(AObject *obj) {
     vlen_t len = sizeof(AObject) + sizeof(AObject*) * obj->attrs + obj->size;
     AObject *o = (AObject*) malloc(len);
     memcpy(o, obj, len);
+    o->pool = NULL;
     return o;
 }
 
@@ -169,11 +289,33 @@ API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
     if (sym >= c->attr_map_len) A_error("object has no %s attribute", symbolName(sym));
     ao = c->attr_map[sym];
     if (!ao) A_error("object has no %s attribute", symbolName(sym));
-    // FIXME: mem mgmt
-    if (ao > 0)
-	o->attr[sym] = val;
-    else
-	c->attr[1 - ao] = val;
+    if (ao > 0) { /* object-level attribute */
+	AObject *ov = o->attr[sym];
+	if (ov != val) {
+	    o->attr[sym] = val;
+	    if (ov && ov->pool != gc_pool) /* if the value was not GC'd we can free it [since we owned it it can't be in a local pool - but we could add a sanity check] */
+		_freeObject(ov);
+	    if (val->pool != gc_pool) { /* if the value is not multi-owned, we have to adjust the pool */
+		if (val->pool) /* has a local pool -> moves from the pool to NULL state which is single ownership */
+		    removeObjectFromPool(val, val->pool);
+		else /* is already single-owned -> has to be moved to the gc pool */
+		    addObjectToPool(val, gc_pool);
+	    }
+	}
+    } else { /* class-level attribute */
+	AObject *ov = c->attr[1 - ao];
+	if (ov != val) { 
+	    c->attr[1 - ao] = val;
+	    if (ov && ov->pool != gc_pool) /* if the value was not GC'd we can free it [since we owned it it can't be in a local pool - but we could add a sanity check] */
+		_freeObject(ov);
+	    if (val->pool != gc_pool) { /* if the value is not multi-owned, we have to adjust the pool */
+		if (val->pool) /* has a local pool -> moves from the pool to NULL state which is single ownership */
+		    removeObjectFromPool(val, val->pool);
+		else /* is already single-owned -> has to be moved to the gc pool */
+		    addObjectToPool(val, gc_pool);
+	    }
+	}
+    }
 }
 
 /* creating subclasses (currently only single inheritance is implmeneted) */
@@ -181,6 +323,7 @@ API_CALL AClass *subclass(AClass *cl, const char *name, symbol_t *new_attributes
     AClass *nc = (AClass*) calloc(1, sizeof(AClass));
     nc->class_obj.attr[0] = (AObject*) classClass;
     nc->name = strdup(name);
+    nc->class_obj.pool = gc_pool; /* FIXME: classes are currently considered constants so they are flagged with gc_pool even though they are not part of it. Maybe they should be subject to the usual memory management.. */
     symbol_t highest_sym = cl->attr_map_len, ca = cl->attrs, *a;
     if (new_attributes) {
 	vlen_t new_atts = 0;

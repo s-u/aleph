@@ -5,6 +5,8 @@
 
 static int aleph_initialized = 0;
 
+static AutoreleasePool *rootPool;
+
 int alephInitialize() {
     if (aleph_initialized) return 0;
 
@@ -13,7 +15,13 @@ int alephInitialize() {
 	return 1;
     }
 
+    gc_pool = newCustomPool(NULL, 1024*1024); /* create the garbage collector pool */
+    rootPool = newPool(); /* create the local root pool */
+    
     printf("sizeof(AObject) = %u, sizeof(AClass) = %u\n", (unsigned int) sizeof(AObject), (unsigned int) sizeof(AClass));
+    
+    /* fix up pools for all static objects -- we are currently flagging constents with gc_pool even though they are not incuded it in, because objects with gc_pool are not freed */
+    nullObject->pool = gc_pool;
     
     newSymbol(""); /* symbol at index 0 is the empty symbol - it is interpreted as no symbol in maps */
     newSymbol("class"); /* symbol #1 is the class */
@@ -52,6 +60,7 @@ int alephInitialize() {
     complexClass = subclass(vectorClass, "complex", NULL, NULL);
     
     /* initialize R compatibility code */
+    /* NOTE: this will create some objects in the root pool, so the root pool should never go away until you're done with R */
     init_Rcompat();
     return 0;
 }
@@ -62,6 +71,8 @@ SEXP parsingTest(FILE *f);
 int main(int argc, char **argv) {
     if (alephInitialize())
 	return 1;
+    
+    AutoreleasePool *pool = newPool();
     
     AObject *str = mkString("foo");
     
@@ -80,11 +91,22 @@ int main(int argc, char **argv) {
     PrintValue((AObject*) &symbol[newSymbol("class")]);
     
     FILE *f = fopen("test.R", "r");
-    if (!f) { fprintf(stderr, "ERROR: cannot open test.R for reading\n"); return 1; }
-    
-    AObject *p = parsingTest(f); 
-    PrintValue(p);
-    
+    if (!f)
+	fprintf(stderr, "ERROR: cannot open test.R for reading\n");
+    else {
+	AObject *p = parsingTest(f); 
+	PrintValue(p);
+    }
+
+    printf("The local pool contains %d objects\n", pool->count);
+    releasePool(pool);
+
+    printf("The root pool contains %d objects\n", rootPool->count);
+    releasePool(rootPool); /* remove the root pool */
+
+    printf("The gc pool contains %d objects\n", gc_pool->count);
+    releasePool(gc_pool); /* also remove the gc pool and thus all objects */
+
     return 0;
 }
 

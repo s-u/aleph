@@ -19,21 +19,25 @@ typedef struct AClass_s AClass;
 typedef struct AObject_s AObject;
 typedef struct ASymbol_s ASymbol;
 
+typedef struct AutoreleasePool_s AutoreleasePool;
+
 /*============== internals =============*/
 
-/* the object layout is very simple:
+/* the object layout is very simple: [[NOTE if changed, you must also update static class definitions!]]
  0  # of attrs
- 1  size (in excess of sizeof(AObject))
- 2  length (in elements - for vector objects)
- 3  class (zero-attribute)
+ 1  length (in elements - for vector objects)
+ 2  pointer to the pool owning this obejct (or NULL is it is owned by a single other object)
+ 3  size (in excess of sizeof(AObject))
+ 4  class (zero-attribute)
  *  any further attributes
  *  data 
  
- the smallest object is 16 (32-bit) or 24 bytes (64-bit) long
+ the smallest object is 20 (32-bit) or 32 bytes (64-bit) long
  */
 
 struct AObject_s {
     vlen_t attrs, len; /* number of attributes, length */
+    AutoreleasePool *pool; /* this the allocation pool owning this object. */
     vsize_t size;      /* size of the data portion (64-bit safe) */
     AObject *attr[1];  /* array of attributes - the first one is not counted in attrs and is the class object */
 };
@@ -72,6 +76,7 @@ struct AClass_s {
     vlen_t (*length)(AObject *);
     AObject *(*eval)(AObject *, AObject *);
     AObject *(*call)(AObject *, AObject *, AObject *); /* fun, args, where (can be used to eval args if desired) */
+    /* -- maybe a destructor? -- */
 };
 
 #endif
