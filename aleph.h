@@ -51,6 +51,7 @@ API_CALL AObject *A_error(const char *fmt, ...) {
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    fprintf(stderr, "\n");
     longjmp(error_jmpbuf, 1);
     return NULL;
 }
@@ -328,9 +329,21 @@ API_FN AObject *default_eval(AObject *obj, AObject *where) {
     return obj;
 }
 
+API_CALL void PrintValue(AObject *obj);
+
 API_FN AObject *default_call(AObject *obj, AObject *args, AObject *where) {
-    A_error("call to a non-function");
+    A_error("call to a non-function ");
     return obj;
+}
+
+API_FN AObject *lang_eval(AObject *obj, AObject *where) {
+    AObject *car = obj->attr[2];
+    AObject *cdr = obj->attr[1];
+    printf("lang eval: "); PrintValue(car);
+    car = CLASS(car)->eval(car, where);
+    printf(" car eval: "); PrintValue(car);
+    printf(" cdr     : "); PrintValue(cdr);
+    return CLASS(car)->call(car, cdr, where);
 }
 
 /* special NULL object */
@@ -348,7 +361,7 @@ API_CALL symbol_t newSymbol(const char *name) {
     for (;i < symbols; i++)
 	if (!strcmp(symbol[i].name, name))
 	    return i;
-    symbol[symbols].obj.attrs = 1;
+    symbol[symbols].obj.attrs = 0;
     symbol[symbols].obj.size = sizeof(char *);
     symbol[symbols].obj.attr[0] = (AObject*) symbolClass; /* this is ok even with class write barrier since symbolClass is constant */
     symbol[symbols].obj.pool = gc_pool; /* flag it as constant to gc_pool */
@@ -372,7 +385,7 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
     if (sym >= c->attr_map_len) return A_error("object has no %s attribute", symbolName(sym));
     ao = c->attr_map[sym];
     if (!ao) return A_error("object has no %s attribute", symbolName(sym));
-    a = (ao > 0) ? o->attr[sym] : c->attr[1 - ao];
+    a = (ao > 0) ? o->attr[ao] : c->attr[1 - ao];
     return a ? a : nullObject;
 }
 
@@ -406,9 +419,9 @@ API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
     if (!ao) A_error("object has no %s attribute", symbolName(sym));
     /* FIXME: this is old code before we had set() - we should re-write it to use set() instead ... */
     if (ao > 0) { /* object-level attribute */
-	AObject *ov = o->attr[sym];
+	AObject *ov = o->attr[ao];
 	if (ov != val) {
-	    o->attr[sym] = val;
+	    o->attr[ao] = val;
 	    if (ov && ov->pool != gc_pool) /* if the value was not GC'd we can free it [since we owned it it can't be in a local pool - but we could add a sanity check] */
 		_freeObject(ov);
 	    if (val->pool != gc_pool) { /* if the value is not multi-owned, we have to adjust the pool */
@@ -520,7 +533,7 @@ API_CALL int isAssignable(AObject *o, AClass *cl) {
 /* FIXME: we should really start with unnamed primitive vectors and define the compatibility using pure Aleph code ... Otherwise this will haut us when we start defining fast primitive methods for arithmetics .. */
 
 API_VAR AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass;
-API_VAR AClass *stringClass, *pairlistClass, *langClass, *complexClass, *logicalClass;
+API_VAR AClass *stringClass, *pairlistClass, *langClass, *complexClass, *logicalClass, *envClass;
 
 API_CALL AObject *allocRealVector(vlen_t n) {
     return allocVarObject(realClass, sizeof(double) * n, n);
@@ -536,6 +549,16 @@ API_CALL AObject *allocLogicalVector(vlen_t n) {
 
 API_CALL AObject *allocObjectVector(AClass *cl, vlen_t n) {
     return allocVarObject(cl, sizeof(AObject*) * n, n);
+}
+
+API_CALL AObject *allocEnv() {
+    vlen_t init_len = 1024;
+    AObject *env = allocObject(envClass);
+    AObject *values = allocVarObject(listClass, sizeof(AObject*) * init_len, 0);
+    AObject *names = allocVarObject(stringClass, sizeof(AObject*) * init_len, 0);
+    setAttr(env, newSymbol("names"), names);
+    setAttr(env, newSymbol("values"), values);
+    return env;
 }
 
 #define DIRECT_CDR(X) ((X)->attr[1])
@@ -594,6 +617,7 @@ API_CALL AObject *allocComplexVector(vlen_t n) {
 
 #define GET_VECTOR_ELT(X,I) (((AObject**)ADataPtr(X))[I])
 #define SET_VECTOR_ELT(X,I,V) set(((AObject**)ADataPtr(X)) + (I), V)
+#define VECTOR_ELT GET_VECTOR_ELT
 #define GET_STRING_ELT GET_VECTOR_ELT
 #define STRING_ELT GET_VECTOR_ELT
 #define SET_STRING_ELT SET_VECTOR_ELT
@@ -627,8 +651,16 @@ API_CALL void PrintValue(AObject *obj) {
 	printf("AObject<0x0!>\n"); 
     else if(obj == nullObject)
 	printf("NULL object\n");
-    else
+    else if (CLASS(obj) == symbolClass)
+	printf("ASymbol<%p> '%s'\n", obj, ((ASymbol*)obj)->name);
+    else {
 	printf("AObject<%p>, class=%s, attrs=%u, size=%lu, len=%u\n", obj, className(obj), obj->attrs, obj->size, obj->len);
+	vlen_t i, n = obj->attrs;
+	for (i = 0; i < n;) {
+	    printf("  [%p.%d]: ", obj, ++i);
+	    if (obj->attr[i]) PrintValue(obj->attr[i]); else printf("NULL-ptr\n");
+	}
+    }
 }
 
 /* primitive methods (e.g. length) - could be class-level attributes or (probably better for speed) direct function pointers */
@@ -636,11 +668,75 @@ API_CALL void PrintValue(AObject *obj) {
 
 /* TODO: functions, methods ... */
 
+API_CALL AObject *symbol_get(symbol_t sym_, AObject *where) {
+    ASymbol *sym = symbol + sym_;
+    const char *sym_name = sym->name;
+    if (!where) return NULL;
+    AObject *names = getAttr(where, newSymbol("names"));
+    AObject *vals  = getAttr(where, newSymbol("values"));
+    if (vals && names && LENGTH(names) == LENGTH(vals) && LENGTH(names) > 0) {
+	vsize_t i, n = LENGTH(names);
+	for (i = 0; i < n; i++) {
+	    AObject *o = GET_STRING_ELT(names, i);
+	    if (o && !strcmp(CHAR(o), sym_name))
+		return GET_VECTOR_ELT(vals, i);
+	}
+    }	    
+    return NULL;
+}
+
+API_CALL int symbol_set(symbol_t sym_, AObject *val, AObject *where) {
+    ASymbol *sym = symbol + sym_;
+    const char *sym_name = sym->name;
+    if (!where) { A_warning("symbol_set: where is NULL"); return 0; }
+    printf("symbol_set '%s': ", sym_name);
+    PrintValue(val);
+    AObject *names = getAttr(where, newSymbol("names"));
+    printf("names : "); PrintValue(names);
+    AObject *vals  = getAttr(where, newSymbol("values"));
+    printf("values: "); PrintValue(vals);
+    if (vals && names && LENGTH(names) == LENGTH(vals)) {
+	vsize_t i, n = LENGTH(names);
+	for (i = 0; i < n; i++) {
+	    AObject *o = GET_STRING_ELT(names, i);
+	    if (o && !strcmp(CHAR(o), sym_name)) {
+		SET_VECTOR_ELT(vals, i, val);
+		return 1;
+	    }
+	}
+	/* FIXME: this is a bad hack for now ... we should be checking size and re-allocating */
+	if ((names->len + 2) * sizeof(AObject*) > names->size ||
+	    (vals->len + 2) * sizeof(AObject*) > vals->size) {
+	    A_warning("symbol_set: out of memory [%d,%d,%d,%d]", 
+		      (names->len + 2) * sizeof(AObject*), names->size,
+		      (vals->len + 2) * sizeof(AObject*), vals->size
+		      );
+	    return 0;
+	}
+	names->len++;
+	SET_STRING_ELT(names, i, mkChar(sym_name));
+	vals->len++;
+	SET_VECTOR_ELT(vals, i, val);
+	return 1;
+    }
+    A_warning("invalid environment");
+    return 0;
+}
+
 API_CALL AObject *symbol_eval(AObject *obj, AObject *where) {
-    ASymbol *sym = (ASymbol*) obj;
-    /* TODO: look up symbol */
-    A_error("symbol %s is undefined", sym->name);
-    return nullObject;
+    if (!where)
+	A_error("invalid context (NULL)");
+    else {
+	AObject *o = symbol_get(ASymbol2sym_t(obj), where);
+	if (!o) 
+	    A_error("symbol %s is undefined", ((ASymbol*)obj)->name);
+	return o;
+    }
+    return NULL;
+}
+
+API_CALL AObject *eval(AObject *obj, AObject *where) {
+    return CLASS(obj)->eval(obj, where);
 }
 
 #define R_NilValue nullObject

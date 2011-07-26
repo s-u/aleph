@@ -7,5 +7,5 @@ AClass symbolClass[1] = { { { 0, 0, 0, 0, { (AObject*) classClass } } , "symbol"
 
 AObject nullObject[1] = { { 0, 0, 0, 0, { (AObject*) nullClass } } };
 
-AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass;
+AClass *vectorClass, *numericClass, *realClass, *integerClass, *listClass, *charClass, *envClass;
 AClass *stringClass, *pairlistClass, *langClass, *complexClass, *logicalClass;

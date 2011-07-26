@@ -5,6 +5,35 @@
 
 static int aleph_initialized = 0;
 
+typedef AObject *(*native_fn_ptr)(AObject *args, AObject *where);
+
+/* native functions */
+static AObject *native_fn_call(AObject *obj, AObject *args, AObject *where) {
+    native_fn_ptr ptr = (native_fn_ptr) obj->attr[obj->attrs + 1];
+    if (!ptr) A_error("Attempt to call a native function pointing to NULL");
+    return ptr(args, where);
+}
+
+#include <dlfcn.h>
+
+AClass *natFnClass;
+
+static AObject *native_fn_constructor(AObject *args, AObject *where) {
+    if (CLASS(args) != pairlistClass || CAR(args) == nullObject)
+	A_error("'name' is missing in call to nativeFunction");
+    const char *name = CHAR(STRING_ELT(CAR(args), 0));
+    void *dl = dlopen(NULL, RTLD_LAZY | RTLD_GLOBAL);
+    if (!dl) A_error("cannot open dynamc library");
+    void *addr = dlsym(dl, name);
+    if (!addr) {
+	dlclose(dl);
+	A_error("unable to find symbol '%s'", name);
+    }
+    AObject *fn = allocVarObject(natFnClass, sizeof(void*), 0);
+    fn->attr[fn->attrs + 1] = addr;
+    return fn;
+}
+
 int alephInitialize() {
     if (aleph_initialized) return 0;
 
@@ -39,6 +68,11 @@ int alephInitialize() {
     
     /* set pool to gc_pool for all static classes as constants */
     symbolClass->class_obj.pool = nullClass->class_obj.pool = classClass->class_obj.pool = objectClass->class_obj.pool = gc_pool;
+
+    /* FIXME: this is a temporary definitiong of environments */
+    symbol_t envAttrs[4] = { newSymbol("names"), newSymbol("values"), newSymbol("parent"), 0 };
+    envClass = subclass(objectClass, "environment", envAttrs, NULL);
+    envClass->copy = default_nocopy; /* reference semantics */
     
     /* define most basic classes that are not directly definable due to cycles */
     charClass = subclass(objectClass, "characterString", NULL, NULL); /* this one doesn't really exist in R */
@@ -53,13 +87,19 @@ int alephInitialize() {
 
     /* remaining vector classes (we could really do that in Aleph code)  */
     langClass = subclass(pairlistClass, "language", NULL, NULL);
+    langClass->eval = lang_eval;
     numericClass = subclass(vectorClass, "numeric", NULL, NULL);
     realClass = subclass(numericClass, "real", NULL, NULL);
     integerClass = subclass(numericClass, "integer", NULL, NULL);
     listClass = subclass(vectorClass, "list", NULL, NULL);
     logicalClass = subclass(vectorClass, "logical", NULL, NULL);
     complexClass = subclass(vectorClass, "complex", NULL, NULL);
-    
+
+    AClass *pointerClass = subclass(objectClass, "pointer", NULL, NULL);
+    /* FIXME: this is a quick hack for experiments - we will need arguments (formals) and possibly other info */
+    natFnClass = subclass(pointerClass, "nativeFunction", NULL, NULL);
+    natFnClass->call = native_fn_call;
+
     /* initialize R compatibility code */
     /* NOTE: this will create some objects in the root pool, so the root pool should never go away until you're done with R */
     init_Rcompat();
@@ -68,6 +108,13 @@ int alephInitialize() {
 
 /* from gram.y */
 SEXP parsingTest(FILE *f);
+
+AObject *foo(AObject *args, AObject *where) {
+    printf("foo has been invoked with: ");
+    PrintValue(args);
+    return mkString("foo");
+}
+
 
 int main(int argc, char **argv) {
     if (alephInitialize())
@@ -86,16 +133,31 @@ int main(int argc, char **argv) {
     PrintValue(GET_VECTOR_ELT(str, 0));
     
     PrintValue(obj);
-    PrintValue(getAttr(obj, newSymbol("names")));
-    PrintValue(getAttr(obj, newSymbol("class")));
+    //PrintValue(getAttr(obj, newSymbol("names")));
+    //PrintValue(getAttr(obj, newSymbol("class")));
     
-    PrintValue((AObject*) &symbol[newSymbol("class")]);
-    
+    //PrintValue((AObject*) &symbol[newSymbol("class")]);
+
+    /* our evaluation environemnt */
+    AObject *env = allocEnv();
+
+    /* create one object - the constructor to native functions so we can create them */
+    AObject *natFnConstr = allocVarObject(natFnClass, sizeof(native_fn_ptr), 1);
+    natFnConstr->attr[natFnConstr->attrs + 1] = native_fn_constructor;
+    symbol_set(newSymbol("nativeFunction"), natFnConstr, env);
+
+    PrintValue(env);
+
     FILE *f = fopen("test.R", "r");
     if (!f)
 	fprintf(stderr, "ERROR: cannot open test.R for reading\n");
     else {
-	AObject *p = parsingTest(f); 
+	AObject *p = parsingTest(f);
+	printf("-- parser result:\n");
+	PrintValue(p);
+	printf("-- evaluate:\n");
+	p = eval(p, env);
+	printf("-- result:\n");
 	PrintValue(p);
     }
 
