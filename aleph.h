@@ -43,11 +43,15 @@
 API_VAR AClass classClass[1], objectClass[1];
 API_VAR AClass nullClass[1], symbolClass[1];
 
+/* cached symbols */
+API_VAR symbol_t AS_next, AS_head, AS_names, AS_class, AS_tag;
+
 /* very crude error handling for now */
 GHVAR jmp_buf error_jmpbuf;
 
 API_CALL AObject *A_error(const char *fmt, ...) {
     va_list (ap);
+    fprintf(stderr, "*** ERROR: ");
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -337,6 +341,7 @@ API_FN AObject *default_call(AObject *obj, AObject *args, AObject *where) {
 }
 
 API_FN AObject *lang_eval(AObject *obj, AObject *where) {
+    /* FIXME: we should really use getAttr() instead ... */
     AObject *car = obj->attr[2];
     AObject *cdr = obj->attr[1];
     printf("lang eval: "); PrintValue(car);
@@ -729,7 +734,7 @@ API_CALL AObject *symbol_eval(AObject *obj, AObject *where) {
     else {
 	AObject *o = symbol_get(ASymbol2sym_t(obj), where);
 	if (!o) 
-	    A_error("symbol %s is undefined", ((ASymbol*)obj)->name);
+	    A_error("symbol '%s' is undefined", ((ASymbol*)obj)->name);
 	return o;
     }
     return NULL;

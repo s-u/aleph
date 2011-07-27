@@ -4,6 +4,7 @@
 /* most basic types used in Aleph */
 
 typedef unsigned int  vlen_t;
+typedef int vdiff_t;
 typedef unsigned long vsize_t;
 typedef unsigned int  symbol_t;
 typedef signed int    smapi_t;

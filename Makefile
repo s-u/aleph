@@ -5,7 +5,7 @@ CPPFLAGS=-I.
 CFLAGS=-g -Wall
 YACC=yacc
 
-SRC=classes.c globals.c main.c gc.c
+SRC=classes.c globals.c main.c gc.c basic.c arith.c symbols.c
 OBJ=$(SRC:%.c=%.o) gram.tab.o
 
 all: aleph
@@ -32,3 +32,6 @@ globals.o: globals.c aleph.h types.h
 gram.tab.o: gram.tab.c Rcompat.h aleph.h types.h
 main.o: main.c aleph.h types.h Rcompat.h
 gc.o: gc.c aleph.h types.h
+basic.o: aleph.h types.h
+arith.c: aleph.h types.h
+symbols.c: types.h

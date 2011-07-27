@@ -18,7 +18,7 @@ static AObject *native_fn_call(AObject *obj, AObject *args, AObject *where) {
 
 AClass *natFnClass;
 
-static AObject *native_fn_constructor(AObject *args, AObject *where) {
+static AObject *create_native_fn(AObject *args, AObject *where) {
     if (CLASS(args) != pairlistClass || CAR(args) == nullObject)
 	A_error("'name' is missing in call to nativeFunction");
     const char *name = CHAR(STRING_ELT(CAR(args), 0));
@@ -30,6 +30,8 @@ static AObject *native_fn_constructor(AObject *args, AObject *where) {
 	A_error("unable to find symbol '%s'", name);
     }
     AObject *fn = allocVarObject(natFnClass, sizeof(void*), 0);
+    setAttr(fn, newSymbol("formals"), CDR(args));
+    setAttr(fn, newSymbol("environment"), where);
     fn->attr[fn->attrs + 1] = addr;
     return fn;
 }
@@ -76,12 +78,12 @@ int alephInitialize() {
     
     /* define most basic classes that are not directly definable due to cycles */
     charClass = subclass(objectClass, "characterString", NULL, NULL); /* this one doesn't really exist in R */
-    symbol_t vectorAttrs[2] = { newSymbol("names"), 0 };
+    symbol_t vectorAttrs[2] = { AS_names = newSymbol("names"), 0 };
     vectorClass = subclass(objectClass, "vector", vectorAttrs, NULL); /* we cannot specify type because character class doesn't exist yet */
     stringClass = subclass(vectorClass, "character", NULL, NULL);
     vectorClass->attr_classes[0] = stringClass; /* fix up class for "names" now that we have defined "character" class */
     stringClass->attr_classes[0] = stringClass; /* the fixup is needed in both class object */
-    symbol_t pairlistAttrs[4] = { newSymbol("next"), newSymbol("head"), newSymbol("tag"), 0 };
+    symbol_t pairlistAttrs[4] = { AS_next = newSymbol("next"), AS_head = newSymbol("head"), AS_tag = newSymbol("tag"), 0 };
     pairlistClass = subclass(objectClass, "pairlist", pairlistAttrs, NULL);
     pairlistClass->attr_classes[0] = pairlistClass; /* "next" is recursive */
 
@@ -97,7 +99,8 @@ int alephInitialize() {
 
     AClass *pointerClass = subclass(objectClass, "pointer", NULL, NULL);
     /* FIXME: this is a quick hack for experiments - we will need arguments (formals) and possibly other info */
-    natFnClass = subclass(pointerClass, "nativeFunction", NULL, NULL);
+    symbol_t natFnAttr[3] = { newSymbol("formals"), newSymbol("environment"), 0 };
+    natFnClass = subclass(pointerClass, "nativeFunction", natFnAttr, NULL);
     natFnClass->call = native_fn_call;
 
     /* initialize R compatibility code */
@@ -119,6 +122,11 @@ AObject *foo(AObject *args, AObject *where) {
 int main(int argc, char **argv) {
     if (alephInitialize())
 	return 1;
+
+    ON_ERROR {
+	fprintf(stderr, "Terminating due to a run-time error\n");
+	return 1;
+    }
     
     AllocationPool *pool = newPool();
     
@@ -143,8 +151,9 @@ int main(int argc, char **argv) {
 
     /* create one object - the constructor to native functions so we can create them */
     AObject *natFnConstr = allocVarObject(natFnClass, sizeof(native_fn_ptr), 1);
-    natFnConstr->attr[natFnConstr->attrs + 1] = native_fn_constructor;
+    natFnConstr->attr[natFnConstr->attrs + 1] = (AObject*) create_native_fn;
     symbol_set(newSymbol("nativeFunction"), natFnConstr, env);
+    symbol_set(newSymbol("="), create_native_fn(list1(mkString("fn_assign")), env), env);
 
     PrintValue(env);
 
@@ -152,13 +161,17 @@ int main(int argc, char **argv) {
     if (!f)
 	fprintf(stderr, "ERROR: cannot open test.R for reading\n");
     else {
-	AObject *p = parsingTest(f);
-	printf("-- parser result:\n");
-	PrintValue(p);
-	printf("-- evaluate:\n");
-	p = eval(p, env);
-	printf("-- result:\n");
-	PrintValue(p);
+	while (1) {
+	    printf("-- parsing ...\n");
+	    AObject *p = parsingTest(f);
+	    printf("-- parser result:\n");
+	    PrintValue(p);
+	    if (!p) break;
+	    printf("-- evaluate:\n");
+	    p = eval(p, env);
+	    printf("-- result:\n");
+	    PrintValue(p);
+	}
     }
 
     printf("The local pool contains %d objects\n", pool->count);
