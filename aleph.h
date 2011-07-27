@@ -394,6 +394,14 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
     return a ? a : nullObject;
 }
 
+API_CALL AObject *getClassAttr(AClass *cls, symbol_t sym) {
+  smapi_t ao;
+  if (sym == 1) return (AObject*) cls;
+  if (sym >= cls->attr_map_len) return NULL;
+  ao = cls->attr_map[sym];
+  return (ao > 0) ? NULL : cls->attr[1 - ao];
+}
+
 /* write-barrier set method to any object pointer location. It needs **ptr because it has to take care of the old value as well as set the new value. */
 API_CALL AObject *set(AObject **ptr, AObject *val) {
     AObject *ov = ptr[0];
@@ -743,6 +751,10 @@ API_CALL AObject *symbol_eval(AObject *obj, AObject *where) {
 API_CALL AObject *eval(AObject *obj, AObject *where) {
     return CLASS(obj)->eval(obj, where);
 }
+
+#include "methods.h"
+
+/** the following should probably go to Rcompat.h instead */
 
 #define R_NilValue nullObject
 

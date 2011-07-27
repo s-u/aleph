@@ -35,3 +35,4 @@ gc.o: gc.c aleph.h types.h
 basic.o: aleph.h types.h
 arith.c: aleph.h types.h
 symbols.c: types.h
+aleph.h: types.h methods.h
