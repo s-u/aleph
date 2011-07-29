@@ -68,6 +68,40 @@ API_CALL AObject *A_warning(const char *fmt, ...) {
     return NULL;
 }
 
+API_CALL AObject *A_printf(const char *fmt, ...) {
+    va_list (ap);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    return NULL;
+}
+
+#define A_printv A_printf
+API_CALL void A_printvstart() {
+    A_printf(" [%d] ", 1);
+}
+API_CALL void A_printvend() {
+    A_printf("\n");
+}
+
+#ifdef ADEBUG
+API_CALL AObject *A_debug(int level, const char *fmt, ...) {
+    va_list (ap);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);    
+    fprintf(stderr, "\n");
+    return NULL;
+}
+#define ADL_alloc 1
+#define ADL_pools 1
+#define ADL_attr  1
+#define ADL_set   1
+#define ADL_info  1
+#else
+#define A_debug(L, X, ...)
+#endif
+
 #define NEW_CONTEXT if (setjmp(error_jmpbuf) == 0)
 #define ON_ERROR if (setjmp(error_jmpbuf))
 
@@ -83,7 +117,7 @@ API_CALL void *Amalloc(size_t size) {
 	if (!v)
 	    A_error("FATAL: out of memory - cannot allocate object of size %ld", (long) size);
     }
-    printf(" + malloc<%p .. %p>\n", v, ((char*)v) + size);
+    A_debug(ADL_alloc, " + malloc<%p .. %p>", v, ((char*)v) + size);
     return v;
 }
 
@@ -97,7 +131,7 @@ API_CALL void *Acalloc(size_t count, size_t size) {
 	if (!v)
 	    A_error("FATAL: out of memory - cannot allocate zeroed object of size %ld", rs);
     }
-    printf(" + calloc<%p .. %p>\n", v, ((char*)v) + (count * size));
+    A_debug(ADL_alloc, " + calloc<%p .. %p>", v, ((char*)v) + (count * size));
     return v;
 }
 
@@ -109,7 +143,7 @@ API_CALL void *Arealloc(void *ptr, size_t size) {
 	if (!v)
 	    A_error("FATAL: out of memory - cannot reallocate object of size %ld", (long) size);
     }
-    printf(" + realloc <%p> to <%p .. %p>\n", ptr, v, ((char*)v) + size);
+    A_debug(ADL_alloc, " + realloc <%p> to <%p .. %p>", ptr, v, ((char*)v) + size);
     return v;
 }
 
@@ -144,7 +178,7 @@ GHVAR ThreadContext mainThreadContext;
 /** this is the internal, low-level free call - it should never be made available to the outside code. This call is used to free an object that is already devoid of any references. */
 HIDDEN_CALL void _freeObject(AObject *o) {
     /* FIXME: recursively delete ... destructor? */
-    printf(" - freeing object <%p>\n", o);
+    A_debug(ADL_alloc, " - freeing object <%p>", o);
     free(o);
 }
 
@@ -184,7 +218,7 @@ API_CALL AllocationPool *newCustomPool(AllocationPool *parent, vlen_t size) {
 	}
 	parent->next = np;
     }
-    printf(" + new autorelease pool <%p>, size=%d\n", np, size);
+    A_debug(ADL_pools, " + new autorelease pool <%p>, size=%d", np, size);
     return np;
 }
 
@@ -192,7 +226,7 @@ API_CALL void releasePool(AllocationPool *pool) {
     vlen_t i = 0, n;
     if (!pool) return;
     if (pool->next) releasePool(pool->next);
-    printf(" - releasing pool <%p> (count=%d)\n", pool, pool->count);
+    A_debug(ADL_pools, " - releasing pool <%p> (count=%d)", pool, pool->count);
     if (pool->count) {
 	/* all objects in the pool are only owned by the pool so we can free them directly */
 	n = pool->watermark;
@@ -221,7 +255,7 @@ API_CALL AllocationPool *newPool() {
 
 API_CALL AObject *addObjectToPool(AObject *obj, AllocationPool *pool) {
     int is_gc = (pool == gc_pool);
-    printf(" - move <%p> to pool <%p>(%d/%d,%d)%s\n", obj, pool, pool->count, pool->length, pool->ptr, is_gc ? " (gc_pool)" : "");
+    A_debug(ADL_pools, " - move <%p> to pool <%p>(%d/%d,%d)%s", obj, pool, pool->count, pool->length, pool->ptr, is_gc ? " (gc_pool)" : "");
     while (pool->next && pool->count == pool->length) pool = pool->next; /* find some available pool ...*/
     if (pool->count == pool->length) /* or .. if there is none, create another pool (take the size from the parent) */
 	pool = newCustomPool(pool, pool->length);
@@ -240,7 +274,7 @@ API_CALL AObject *addObjectToPool(AObject *obj, AllocationPool *pool) {
 API_CALL AObject *removeObjectFromPool(AObject *obj, AllocationPool *pool) {
     if (pool) {
 	vlen_t i = pool->ptr;
-	printf(" - remove <%p> from pool <%p>(%d/%d,%d)\n", obj, pool, pool->count, pool->length, pool->ptr);
+	A_debug(ADL_pools, " - remove <%p> from pool <%p>(%d/%d,%d)", obj, pool, pool->count, pool->length, pool->ptr);
 	/* fast-track heuristic -- if there were no holes we can optimize FILO by looking just before ptr */
 	if (i) i--;
 	if (pool->item[i] != obj) { /* if we didn't find it right away, start a full search */
@@ -286,7 +320,7 @@ API_CALL AObject *allocVarObject(AClass *cl, vsize_t size, vlen_t len) {
     o->attrs = a;
     o->size = size;
     o->len = len;
-    printf(" + alloc <%s %p> [%u/%lu/%u]\n", className(o), o, a, size, len);
+    A_debug(ADL_alloc, " + alloc <%s %p> [%u/%lu/%u]", className(o), o, a, size, len);
     addObjectToPool(o, currentPool());
     return o;
 }
@@ -301,7 +335,7 @@ API_CALL AObject *allocObject(AClass *cl) {
     o->attr[0] = (AObject*) cl;
 #endif
     o->attrs = a;
-    printf(" + alloc <%s %p> [%u/no-data]\n", className(o), o, a);
+    A_debug(ADL_alloc, " + alloc <%s %p> [%u/no-data]", className(o), o, a);
     addObjectToPool(o, currentPool());
     return o;
 }
@@ -319,7 +353,16 @@ API_FN AObject *default_nocopy(AObject *obj) {
     return obj;
 }
 
+#define CAR_ATTR_ID 1
+#define TAG_ATTR_ID 2
+#define CDR_ATTR_ID 3
+
 #define DIRECT_DATAPTR(O) ((void*)&((O)->attr[(O)->attrs + 1]))
+
+#define DIRECT_CAR(X) ((X)->attr[CAR_ATTR_ID])
+#define DIRECT_TAG(X) ((X)->attr[TAG_ATTR_ID])
+#define DIRECT_CDR(X) ((X)->attr[CDR_ATTR_ID])
+
 
 API_FN void *default_dataPtr(AObject *obj) {
     return DIRECT_DATAPTR(obj);
@@ -333,7 +376,9 @@ API_FN AObject *default_eval(AObject *obj, AObject *where) {
     return obj;
 }
 
-API_CALL void PrintValue(AObject *obj);
+API_CALL void PrintValueL(AObject *obj, vlen_t level);
+
+#define PrintValue(X) PrintValueL(X, 0)
 
 API_FN AObject *default_call(AObject *obj, AObject *args, AObject *where) {
     A_error("call to a non-function ");
@@ -342,12 +387,16 @@ API_FN AObject *default_call(AObject *obj, AObject *args, AObject *where) {
 
 API_FN AObject *lang_eval(AObject *obj, AObject *where) {
     /* FIXME: we should really use getAttr() instead ... */
-    AObject *car = obj->attr[2];
-    AObject *cdr = obj->attr[1];
-    printf("lang eval: "); PrintValue(car);
+    AObject *car = DIRECT_CAR(obj);
+    AObject *cdr = DIRECT_CDR(obj);
+#ifdef ADEBUG
+    A_printf("lang eval: "); PrintValue(car);
+#endif
     car = CLASS(car)->eval(car, where);
-    printf(" car eval: "); PrintValue(car);
-    printf(" cdr     : "); PrintValue(cdr);
+#ifdef ADEBUG
+    A_printf(" car eval: "); PrintValue(car);
+    A_printf(" cdr     : "); PrintValue(cdr);
+#endif
     return CLASS(car)->call(car, cdr, where);
 }
 
@@ -371,7 +420,7 @@ API_CALL symbol_t newSymbol(const char *name) {
     symbol[symbols].obj.attr[0] = (AObject*) symbolClass; /* this is ok even with class write barrier since symbolClass is constant */
     symbol[symbols].obj.pool = gc_pool; /* flag it as constant to gc_pool */
     symbol[symbols].name = strdup(name);
-    printf(" - new symbol: [%d] %s\n", symbols + 1, name);
+    A_debug(ADL_alloc, " - new symbol: [%d] %s", symbols + 1, name);
     return symbols++;
 }
 
@@ -384,7 +433,7 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
     AClass *c = CLASS(o);
     AObject *a;
     smapi_t ao;
-    printf(" - getAttr <%s %p> %s\n", className(o), o, symbolName(sym));
+    A_debug(ADL_attr, " - getAttr <%s %p> %s", className(o), o, symbolName(sym));
     if (!c) return A_error("class objects have no attributes");
     if (sym == 1) return (AObject*) c; /* class attribute is special */
     if (sym >= c->attr_map_len) return A_error("object has no %s attribute", symbolName(sym));
@@ -395,11 +444,19 @@ API_CALL AObject *getAttr(AObject *o, symbol_t sym) {
 }
 
 API_CALL AObject *getClassAttr(AClass *cls, symbol_t sym) {
-  smapi_t ao;
-  if (sym == 1) return (AObject*) cls;
-  if (sym >= cls->attr_map_len) return NULL;
-  ao = cls->attr_map[sym];
-  return (ao > 0) ? NULL : cls->attr[1 - ao];
+    smapi_t ao;
+    if (sym == 1) return (AObject*) cls;
+    if (sym >= cls->attr_map_len) return NULL;
+    ao = cls->attr_map[sym];
+    return (ao > 0) ? NULL : cls->attr[1 - ao];
+}
+
+API_CALL const char *attrNameAt(AClass *cls, vlen_t index) {
+    vlen_t i, n = cls->attr_map_len;
+    for (i = 0; i < n; i++)
+	if (cls->attr_map[i] == index)
+	    return symbol[i].name;
+    return "<undefined>";
 }
 
 /* write-barrier set method to any object pointer location. It needs **ptr because it has to take care of the old value as well as set the new value. */
@@ -425,7 +482,7 @@ API_CALL void setAttr(AObject *o, symbol_t sym, AObject *val) {
     if (sym == 1) {
 	A_error("currently assignment to the class attribute is not permitted");
     }
-    printf(" - setAttr <%s %p> %s <%s %p>\n", className(o), o, symbolName(sym), className(val), val);
+    A_debug(ADL_attr, " - setAttr <%s %p> %s <%s %p>", className(o), o, symbolName(sym), className(val), val);
     if (!c) A_error("class objects have no attributes");
     if (sym >= c->attr_map_len) A_error("object has no %s attribute", symbolName(sym));
     ao = c->attr_map[sym];
@@ -574,10 +631,6 @@ API_CALL AObject *allocEnv() {
     return env;
 }
 
-#define DIRECT_CDR(X) ((X)->attr[1])
-#define DIRECT_CAR(X) ((X)->attr[2])
-#define DIRECT_TAG(X) ((X)->attr[3])
-
 API_CALL AObject *consPairs(AClass *cl, AObject *car, AObject *cdr, AObject *tag) {
     AObject *o = allocObject(cl);
     set(&DIRECT_CAR(o), car);
@@ -659,20 +712,48 @@ API_CALL AObject *ScalarLogical(bool_t val) {
     return o;
 }
 
-API_CALL void PrintValue(AObject *obj) {
+/* FIXME: this is currently a hack so we can see anything until we have a way to define all the methods to print things
+   We could do this ina  native function, but defining it here makes debugging easier for now .. */
+API_CALL void PrintValueL(AObject *obj, vlen_t level) {
+    vlen_t l;
+    for (l = 0; l < level; l++) A_printf("  ");
     if (!obj)
-	printf("AObject<0x0!>\n"); 
-    else if(obj == nullObject)
-	printf("NULL object\n");
+	A_printf(" <NULL-ptr>\n"); 
+    else if(CLASS(obj) == nullClass)
+	A_printf(" NULL\n");
     else if (CLASS(obj) == symbolClass)
-	printf("ASymbol<%p> '%s'\n", obj, ((ASymbol*)obj)->name);
-    else {
-	printf("AObject<%p>, class=%s, attrs=%u, size=%lu, len=%u\n", obj, className(obj), obj->attrs, obj->size, obj->len);
+	A_printf(" symbol '%s'\n", ((ASymbol*)obj)->name);
+    else if (CLASS(obj) == classClass)
+	A_printf(" class '%s'\n", ((AClass*)obj)->name);
+    else if (CLASS(obj) == integerClass) {
+	int *di = INTEGER(obj);
+	vlen_t i, n = LENGTH(obj);
+	A_printvstart();
+	for (i = 0; i < n; i++)
+	    A_printv("%2d ", di[i]);
+	A_printvend();
+    } else if (CLASS(obj) == realClass) {
+	double *di = REAL(obj);
+	vlen_t i, n = LENGTH(obj);
+	A_printvstart();
+	for (i = 0; i < n; i++)
+	    A_printv("%2g ", di[i]);
+	A_printvend();
+    } else if (CLASS(obj) == stringClass) {
+	vlen_t i, n = LENGTH(obj);
+	A_printvstart();
+	for (i = 0; i < n; i++)
+	    A_printv("'%s' ", CHAR(STRING_ELT(obj, i)));
+	A_printvend();
+    } else {
+	A_printf(" AObject<%p>, class=%s, attrs=%u, size=%lu, len=%u\n", obj, className(obj), obj->attrs, obj->size, obj->len);
 	vlen_t i, n = obj->attrs;
-	for (i = 0; i < n;) {
-	    printf("  [%p.%d]: ", obj, ++i);
-	    if (obj->attr[i]) PrintValue(obj->attr[i]); else printf("NULL-ptr\n");
-	}
+	for (i = 1; i <= n; i++) /* FIXME: attributes have by default NULL-ptr instead of nullObject - we ignore that here */
+	    if (obj->attr[i] && obj->attr[i] != nullObject) {
+		for (l = 0; l < level; l++) A_printf("  ");
+		A_printf("  [%p.%d]%13s: ", obj, i, attrNameAt(CLASS(obj), i));
+		PrintValueL(obj->attr[i], level + 1);
+	    }
     }
 }
 
@@ -702,12 +783,12 @@ API_CALL int symbol_set(symbol_t sym_, AObject *val, AObject *where) {
     ASymbol *sym = symbol + sym_;
     const char *sym_name = sym->name;
     if (!where) { A_warning("symbol_set: where is NULL"); return 0; }
-    printf("symbol_set '%s': ", sym_name);
+#ifdef A_DEBUG
+    A_debug(ADL_set, "symbol_set '%s': ", sym_name);
     PrintValue(val);
+#endif
     AObject *names = getAttr(where, newSymbol("names"));
-    printf("names : "); PrintValue(names);
     AObject *vals  = getAttr(where, newSymbol("values"));
-    printf("values: "); PrintValue(vals);
     if (vals && names && LENGTH(names) == LENGTH(vals)) {
 	vsize_t i, n = LENGTH(names);
 	for (i = 0; i < n; i++) {

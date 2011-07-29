@@ -1,3 +1,7 @@
+/* this is currently unused becasue it doesn't match our long-term methods goal
+   but it may be used as a quick hack to get simple methods going */
+#if 0
+
 #ifndef METHODS_H__
 #define METHODS_H__
 
@@ -81,5 +85,7 @@ API_CALL AObject *create_method(AObject *args, AObject *where) {
     args = getAttr(args, AS_next);
     return name;
 }
+
+#endif
 
 #endif

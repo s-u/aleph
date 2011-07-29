@@ -489,7 +489,6 @@ static int xxvalue(SEXP v, int k, YYLTYPE *lloc)
 	    REPROTECT(SrcRefs = GrowList(SrcRefs, makeSrcref(lloc, SrcFile)), srindex);
 	UNPROTECT_PTR(v);
     }
-    printf("xxvalue: [gc=%d,k=%d] curr = ", GenerateCode, k); PrintValue(v);
     R_CurrentExpr = v;
     return k;
 }
@@ -2870,7 +2869,9 @@ SEXP parsingTest(FILE *f) {
     ParseStatus ps;
     R_ParseErrorMsg[0] = 0;
     SEXP r = R_Parse1File(f, 1, &ps);
-    printf("parse status: %d\nerror message: %s\n", ps, R_ParseErrorMsg);
+#ifdef A_DEBUG
+    printf("parse status: %d, error message: %s\n", ps, R_ParseErrorMsg);
+#endif
     return r;
 }
 #endif

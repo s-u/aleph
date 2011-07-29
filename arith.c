@@ -44,6 +44,14 @@ AObject *fn_add(AObject *args, AObject *where) {
 	    double *c = REAL(res);
 	    for (i = 0; i < k; i++) c[i] = a[i % m] + b[i % n];
 	    return res;
+	} else if (CLASS(left) == integerClass) {
+	    int *a = INTEGER(left);
+	    int *b = INTEGER(right);
+	    vlen_t m = LENGTH(left), n = LENGTH(right), k = (m >= n) ? m : n, i;
+	    AObject *res = allocIntVector(k);
+	    int *c = INTEGER(res);
+	    for (i = 0; i < k; i++) c[i] = a[i % m] + b[i % n];
+	    return res;
 	}
     }
     A_error("no method for '%s' + '%s'", className(left), className(right));

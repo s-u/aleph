@@ -44,10 +44,12 @@ int alephInitialize() {
 	return 1;
     }
 
+    A_printf("----------------------------------------\n\n Aleph v0.0 (absolutely experimental)\n\n");
+
     gc_pool = newCustomPool(NULL, 1024*1024); /* create the garbage collector pool. It's large by default since we don't want to be allocating too many of them (but it could be probably smaller ...) */
     root_pool = newPool(); /* create the root pool */
     
-    printf("sizeof(AObject) = %u, sizeof(AClass) = %u\n", (unsigned int) sizeof(AObject), (unsigned int) sizeof(AClass));
+    A_debug(ADL_info, "sizeof(AObject) = %u, sizeof(AClass) = %u", (unsigned int) sizeof(AObject), (unsigned int) sizeof(AClass));
     
     /* fix up pools for all static objects -- we are currently flagging constants with gc_pool even though they are not incuded it in, because objects with gc_pool are not freed */
     nullObject->pool = gc_pool;
@@ -83,7 +85,7 @@ int alephInitialize() {
     stringClass = subclass(vectorClass, "character", NULL, NULL);
     vectorClass->attr_classes[0] = stringClass; /* fix up class for "names" now that we have defined "character" class */
     stringClass->attr_classes[0] = stringClass; /* the fixup is needed in both class object */
-    symbol_t pairlistAttrs[4] = { AS_next = newSymbol("next"), AS_head = newSymbol("head"), AS_tag = newSymbol("tag"), 0 };
+    symbol_t pairlistAttrs[4] = { AS_head = newSymbol("head"), AS_tag = newSymbol("tag"), AS_next = newSymbol("next"), 0 };
     pairlistClass = subclass(objectClass, "pairlist", pairlistAttrs, NULL);
     pairlistClass->attr_classes[0] = pairlistClass; /* "next" is recursive */
 
@@ -132,6 +134,8 @@ int main(int argc, char **argv) {
     
     AObject *str = mkString("foo");
     
+#ifdef ADEBUG
+    /* some simple tests of the API */
     AObject *obj = allocRealVector(10);
     double *d = REAL(obj);
     int i, n = LENGTH(obj);
@@ -145,6 +149,7 @@ int main(int argc, char **argv) {
     //PrintValue(getAttr(obj, newSymbol("class")));
     
     //PrintValue((AObject*) &symbol[newSymbol("class")]);
+#endif
 
     /* our evaluation environemnt */
     AObject *env = allocEnv();
@@ -155,32 +160,51 @@ int main(int argc, char **argv) {
     symbol_set(newSymbol("nativeFunction"), natFnConstr, env);
     symbol_set(newSymbol("="), create_native_fn(list1(mkString("fn_assign")), env), env);
 
-    PrintValue(env);
+    /* PrintValue(env); */
 
-    FILE *f = fopen("test.R", "r");
+    /* load initial bootstrap code if present */
+    A_printf("--- Loading bootstrap code\n");
+    FILE *f = fopen("init.R", "r");
+    if (f) {
+	while (!feof(f)) {
+	    AObject *p = parsingTest(f);
+	    if (p) eval(p, env);
+	}
+	fclose(f);
+    }
+
+    f = stdin;
+    const char * fn = (argc < 2) ? "test.R" : argv[1];
+    if (fn[0] != '-' || fn[1]) {
+	A_printf("--- Read input from %s\n", fn);
+	f = fopen(fn, "r");
+    } else A_printf("--- Ready for input from the console\n");
     if (!f)
 	fprintf(stderr, "ERROR: cannot open test.R for reading\n");
     else {
 	while (1) {
-	    printf("-- parsing ...\n");
+	    A_debug(ADL_info, "-- parsing ...");
 	    AObject *p = parsingTest(f);
-	    printf("-- parser result:\n");
+	    A_debug(ADL_info, "-- parser result:");
+#ifdef ADEBUG
 	    PrintValue(p);
+#endif
 	    if (!p) break;
-	    printf("-- evaluate:\n");
-	    p = eval(p, env);
-	    printf("-- result:\n");
+	    A_debug(ADL_info, "-- evaluate:");
+	    NEW_CONTEXT
+		p = eval(p, env);
+	    A_debug(ADL_info, "-- result:");
 	    PrintValue(p);
 	}
     }
 
-    printf("The local pool contains %d objects\n", pool->count);
+    A_printf("The local pool contains %d objects\n", pool->count);
     releasePool(pool);
 
-    printf("The root pool contains %d objects\n", root_pool->count);
+    A_printf("The root pool contains %d objects\n", root_pool->count);
     releasePool(root_pool); /* remove the root pool */
 
-    printf("The gc pool contains %d objects\n", gc_pool->count);
+    A_printf("The gc pool contains %d objects\n", gc_pool->count);
     releasePool(gc_pool); /* also remove the gc pool and thus all objects */
 
     return 0;

@@ -1,7 +1,11 @@
 ### most basic makefile for testing Aleph
 
+ifneq ($(DEBUG),)
+CPPDEBUGF=-DADEBUG
+endif
+
 CC=gcc -std=gnu99
-CPPFLAGS=-I.
+CPPFLAGS=-I. $(CPPDEBUGF)
 CFLAGS=-g -Wall
 YACC=yacc
 
